@@ -230,11 +230,19 @@ fn parse_expression_rec(p: &mut Parser, min_bp: u8) {
             && (p.nth(1) == SyntaxKind::OpeningRoundBracket
                 // APPLY can also be followed by a bare function name without parens:
                 // e.g. `* APPLY toString`, `alias_value.* APPLY toString`
-                || (p.at_keyword(Keyword::Apply) && (p.nth(1) == SyntaxKind::BareWord || p.nth(1) == SyntaxKind::QuotedIdentifier)))
+                || (p.at_keyword(Keyword::Apply) && (p.nth(1) == SyntaxKind::BareWord || p.nth(1) == SyntaxKind::QuotedIdentifier))
+                // EXCEPT also supports a bare single column: `* EXCEPT col` —
+                // unless the next word starts a query, which is the
+                // set-operation form (`SELECT * EXCEPT SELECT ...`).
+                || (p.at_keyword(Keyword::Except)
+                    && (p.nth(1) == SyntaxKind::BareWord || p.nth(1) == SyntaxKind::QuotedIdentifier)
+                    && !p.nth_keyword(1, Keyword::Select)
+                    && !p.nth_keyword(1, Keyword::With)))
         {
             // Column transformers: * APPLY(func), * EXCEPT(col), * REPLACE(expr AS name)
             // Can chain: * EXCEPT(id) APPLY(toString)
-            // APPLY also supports bare form: * APPLY func
+            // APPLY also supports bare form: * APPLY func; EXCEPT supports a
+            // bare single column: * EXCEPT col
             let m = p.precede(lhs);
             p.advance(); // consume APPLY/EXCEPT/REPLACE
             if p.at(SyntaxKind::OpeningRoundBracket) {
@@ -918,6 +926,36 @@ mod tests {
                         '('
                         ')'
         "#]]);
+    }
+
+    #[test]
+    fn bare_except_column_transformer() {
+        check_no_errors("SELECT * EXCEPT _row_type, 0 AS bytes FROM t");
+        check("SELECT * EXCEPT _row_type FROM t", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnTransformer
+                      Asterisk
+                        '*'
+                      'EXCEPT'
+                      ExpressionList
+                        ColumnReference
+                          '_row_type'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+        "#]]);
+    }
+
+    #[test]
+    fn except_set_operation_still_parses() {
+        // EXCEPT followed by a query keyword is the set operation, not the
+        // column transformer.
+        check_no_errors("SELECT * FROM a EXCEPT SELECT * FROM b");
     }
 
     #[test]
