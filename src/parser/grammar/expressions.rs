@@ -483,6 +483,17 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
                 parse_interval_expression(p);
                 p.complete(m, SyntaxKind::IntervalExpression)
             }
+            // SQL-standard date/time literals: DATE '2024-01-01',
+            // TIMESTAMP '2024-01-01 00:00:00'
+            else if (p.nth_text(0).eq_ignore_ascii_case("DATE")
+                || p.nth_text(0).eq_ignore_ascii_case("TIMESTAMP"))
+                && p.nth(1) == SyntaxKind::StringToken
+            {
+                let m = p.start();
+                p.advance(); // DATE / TIMESTAMP keyword
+                p.expect(SyntaxKind::StringToken); // string literal
+                p.complete(m, SyntaxKind::DateLiteral)
+            }
             // Subquery starting with SELECT/FROM/WITH
             else if at_select_statement(p) {
                 let m = p.start();
@@ -901,6 +912,43 @@ mod tests {
                         '('
                         ')'
         "#]]);
+    }
+
+    #[test]
+    fn date_literal() {
+        check_no_errors("SELECT * FROM t WHERE dt > DATE '2024-01-01'");
+        check("SELECT DATE '2024-01-01'", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    DateLiteral
+                      'DATE'
+                      ''2024-01-01''
+        "#]]);
+    }
+
+    #[test]
+    fn timestamp_literal() {
+        check_no_errors("SELECT * FROM t WHERE dt < timestamp '2024-01-02 03:04:05'");
+        check("SELECT TIMESTAMP '2024-01-02 03:04:05'", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    DateLiteral
+                      'TIMESTAMP'
+                      ''2024-01-02 03:04:05''
+        "#]]);
+    }
+
+    #[test]
+    fn date_as_identifier_still_parses() {
+        // DATE/TIMESTAMP only form literals when immediately followed by a
+        // string; as plain identifiers they keep parsing as column references.
+        check_no_errors("SELECT date FROM t WHERE date > toDateTime('2024-01-01 00:00:00')");
     }
 
     #[test]
