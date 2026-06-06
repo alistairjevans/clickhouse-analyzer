@@ -417,21 +417,25 @@ fn parse_table_reference(p: &mut Parser) {
         return;
     }
 
-    if (p.at_identifier() || common::at_query_parameter(p))
+    if (p.at_identifier() || common::at_query_parameter(p) || p.at(SyntaxKind::PlaceholderToken))
         && !at_end_of_column_list(p)
     {
         let m = p.start();
         if common::at_query_parameter(p) {
             common::parse_query_parameter(p);
+        } else if p.at(SyntaxKind::PlaceholderToken) {
+            common::parse_placeholder(p);
         } else {
             p.advance();
         }
 
         if p.at(SyntaxKind::Dot) {
             p.advance();
-            if p.at_identifier() || common::at_query_parameter(p) {
+            if p.at_identifier() || common::at_query_parameter(p) || p.at(SyntaxKind::PlaceholderToken) {
                 if common::at_query_parameter(p) {
                     common::parse_query_parameter(p);
+                } else if p.at(SyntaxKind::PlaceholderToken) {
+                    common::parse_placeholder(p);
                 } else {
                     p.advance();
                 }
@@ -1065,6 +1069,48 @@ mod tests {
                   ColumnList
                     NumberLiteral
                       '1'
+        "#]]);
+    }
+
+    #[test]
+    fn select_from_placeholder() {
+        check("SELECT a FROM {{table}}", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'a'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    PlaceholderExpression
+                      '{{table}}'
+        "#]]);
+    }
+
+    #[test]
+    fn select_from_table_function_with_placeholder_args() {
+        check("SELECT a FROM s3Cluster({{cluster}}, {{collection}})", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'a'
+                FromClause
+                  'FROM'
+                  TableFunction
+                    's3Cluster'
+                    '('
+                    PlaceholderExpression
+                      '{{cluster}}'
+                    ','
+                    PlaceholderExpression
+                      '{{collection}}'
+                    ')'
         "#]]);
     }
 

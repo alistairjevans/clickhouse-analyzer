@@ -442,6 +442,12 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
             p.advance();
             p.complete(m, SyntaxKind::NumberLiteral)
         }
+        // Template placeholder: {{name}}
+        SyntaxKind::PlaceholderToken => {
+            let m = p.start();
+            p.advance();
+            p.complete(m, SyntaxKind::PlaceholderExpression)
+        }
         SyntaxKind::BareWord | SyntaxKind::QuotedIdentifier => {
             // NULL literal
             if p.at_keyword(Keyword::Null) {
@@ -949,6 +955,28 @@ mod tests {
         // DATE/TIMESTAMP only form literals when immediately followed by a
         // string; as plain identifiers they keep parsing as column references.
         check_no_errors("SELECT date FROM t WHERE date > toDateTime('2024-01-01 00:00:00')");
+    }
+
+    #[test]
+    fn placeholder_expression() {
+        check_no_errors("SELECT * FROM t WHERE dt > {{start_time}} AND dt < {{end_time}}");
+        check("SELECT x WHERE a = {{value}}", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'x'
+                WhereClause
+                  'WHERE'
+                  BinaryExpression
+                    ColumnReference
+                      'a'
+                    '='
+                    PlaceholderExpression
+                      '{{value}}'
+        "#]]);
     }
 
     #[test]

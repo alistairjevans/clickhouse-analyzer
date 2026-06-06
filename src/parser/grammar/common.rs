@@ -11,6 +11,14 @@ pub fn at_query_parameter(p: &mut Parser) -> bool {
         && p.nth(2) == SyntaxKind::Colon
 }
 
+/// Parse a template placeholder token `{{name}}` into a PlaceholderExpression node.
+/// Caller must verify `p.at(SyntaxKind::PlaceholderToken)` first.
+pub fn parse_placeholder(p: &mut Parser) {
+    let m = p.start();
+    p.expect(SyntaxKind::PlaceholderToken);
+    p.complete(m, SyntaxKind::PlaceholderExpression);
+}
+
 /// Parse a query parameter `{name:Type}` into a QueryParameterExpression node.
 /// Caller must verify `at_query_parameter(p)` first.
 pub fn parse_query_parameter(p: &mut Parser) {
@@ -64,11 +72,11 @@ pub fn parse_on_cluster(p: &mut Parser) {
 /// Each name slot can be a bare identifier, quoted identifier, or query parameter.
 pub fn parse_table_identifier(p: &mut Parser) {
     let m = p.start();
-    if p.at_identifier() || at_query_parameter(p) {
+    if p.at_identifier() || at_query_parameter(p) || p.at(SyntaxKind::PlaceholderToken) {
         parse_identifier_or_param(p);
         if p.at(SyntaxKind::Dot) {
             p.advance();
-            if p.at_identifier() || at_query_parameter(p) {
+            if p.at_identifier() || at_query_parameter(p) || p.at(SyntaxKind::PlaceholderToken) {
                 parse_identifier_or_param(p);
             } else {
                 p.advance_with_error("Expected name after dot");
@@ -80,10 +88,13 @@ pub fn parse_table_identifier(p: &mut Parser) {
     p.complete(m, SyntaxKind::TableIdentifier);
 }
 
-/// Parse either a bare/quoted identifier or a query parameter `{name:Type}`.
+/// Parse a bare/quoted identifier, a query parameter `{name:Type}`, or a
+/// template placeholder `{{name}}`.
 fn parse_identifier_or_param(p: &mut Parser) {
     if at_query_parameter(p) {
         parse_query_parameter(p);
+    } else if p.at(SyntaxKind::PlaceholderToken) {
+        parse_placeholder(p);
     } else {
         p.advance(); // bare word or quoted identifier
     }

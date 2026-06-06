@@ -210,6 +210,7 @@ pub enum SyntaxKind {
     TypedJsonAccessExpression,
     MapExpression,
     QueryParameterExpression,
+    PlaceholderExpression,
     SubqueryExpression,
     LambdaExpression,
     IntervalExpression,
@@ -327,6 +328,8 @@ pub enum SyntaxKind {
     Number,
     StringToken,
     QuotedIdentifier,
+    /// Template placeholder: `{{name}}` (non-standard, used by query templating)
+    PlaceholderToken,
 
     // Brackets
     OpeningRoundBracket,

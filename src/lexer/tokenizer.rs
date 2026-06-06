@@ -123,7 +123,13 @@ impl<'a> Tokenizer<'a> {
             ')' => self.create_token(SyntaxKind::ClosingRoundBracket),
             '[' => self.create_token(SyntaxKind::OpeningSquareBracket),
             ']' => self.create_token(SyntaxKind::ClosingSquareBracket),
-            '{' => self.create_token(SyntaxKind::OpeningCurlyBrace),
+            '{' => {
+                if let Some(token) = self.try_read_placeholder() {
+                    token
+                } else {
+                    self.create_token(SyntaxKind::OpeningCurlyBrace)
+                }
+            }
             '}' => self.create_token(SyntaxKind::ClosingCurlyBrace),
 
             // Punctuation
@@ -503,6 +509,40 @@ impl<'a> Tokenizer<'a> {
         }
     }
 
+    /// Try to read a template placeholder: `{{name}}`.
+    ///
+    /// Called with the first `{` already consumed. The name may contain any
+    /// character except `}` and must be non-empty (the first `}` must be
+    /// immediately followed by a second `}`). On no match, consumes nothing
+    /// beyond the first `{` and returns None so the caller falls back to a
+    /// plain OpeningCurlyBrace token.
+    fn try_read_placeholder(&mut self) -> Option<Token> {
+        let rest = &self.input[self.position..];
+        let mut bytes = rest.bytes();
+
+        if bytes.next() != Some(b'{') {
+            return None;
+        }
+
+        // Find the first `}`; everything before it is the name.
+        let name_len = rest[1..].find('}')?;
+        if name_len == 0 {
+            return None;
+        }
+
+        // Must be a `}}` pair.
+        if rest.as_bytes().get(1 + name_len + 1) != Some(&b'}') {
+            return None;
+        }
+
+        // Consume `{name}}` (the second `{`, the name, and both closing braces).
+        let consumed = 1 + name_len + 2;
+        self.position += consumed;
+        self.chars = self.input[self.position..].chars();
+
+        Some(self.create_token(SyntaxKind::PlaceholderToken))
+    }
+
     /// Read a bareword (identifier or keyword)
     fn read_bare_word(&mut self) -> Token {
         while let Some(c) = self.peek() {
@@ -680,6 +720,78 @@ mod tests {
 
         assert_eq!(tokens[11].kind, SyntaxKind::Number);
         assert_eq!(tokens[11].text(sql), "5");
+    }
+
+    #[test]
+    fn test_tokenize_placeholder() {
+        let sql = "SELECT * FROM {{table}} WHERE x = {{value_1}}";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens[2].kind, SyntaxKind::BareWord); // FROM
+        assert_eq!(tokens[3].kind, SyntaxKind::PlaceholderToken);
+        assert_eq!(tokens[3].text(sql), "{{table}}");
+        assert_eq!(tokens[7].kind, SyntaxKind::PlaceholderToken);
+        assert_eq!(tokens[7].text(sql), "{{value_1}}");
+    }
+
+    #[test]
+    fn test_placeholder_name_may_contain_special_characters() {
+        let sql = "{{a b-c.d}}";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, SyntaxKind::PlaceholderToken);
+        assert_eq!(tokens[0].text(sql), "{{a b-c.d}}");
+    }
+
+    #[test]
+    fn test_empty_placeholder_is_not_a_placeholder() {
+        let sql = "{{}}";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens[0].kind, SyntaxKind::OpeningCurlyBrace);
+        assert_eq!(tokens[1].kind, SyntaxKind::OpeningCurlyBrace);
+        assert_eq!(tokens[2].kind, SyntaxKind::ClosingCurlyBrace);
+        assert_eq!(tokens[3].kind, SyntaxKind::ClosingCurlyBrace);
+    }
+
+    #[test]
+    fn test_unpaired_closing_brace_is_not_a_placeholder() {
+        // First `}` must be immediately followed by a second `}`.
+        let sql = "{{a}b}}";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens[0].kind, SyntaxKind::OpeningCurlyBrace);
+        assert_eq!(tokens[1].kind, SyntaxKind::OpeningCurlyBrace);
+    }
+
+    #[test]
+    fn test_unterminated_placeholder_is_not_a_placeholder() {
+        let sql = "{{abc";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens[0].kind, SyntaxKind::OpeningCurlyBrace);
+        assert_eq!(tokens[1].kind, SyntaxKind::OpeningCurlyBrace);
+        assert_eq!(tokens[2].kind, SyntaxKind::BareWord);
+    }
+
+    #[test]
+    fn test_map_literal_braces_unaffected() {
+        let sql = "{'key': 1}";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens[0].kind, SyntaxKind::OpeningCurlyBrace);
+        assert_eq!(tokens[1].kind, SyntaxKind::StringToken);
+    }
+
+    #[test]
+    fn test_placeholder_with_multibyte_name() {
+        let sql = "{{naïve}}";
+        let tokens = tokenize(sql);
+
+        assert_eq!(tokens.len(), 1);
+        assert_eq!(tokens[0].kind, SyntaxKind::PlaceholderToken);
+        assert_eq!(tokens[0].text(sql), "{{naïve}}");
     }
 
     #[test]

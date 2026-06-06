@@ -186,6 +186,7 @@ export const SyntaxKind = {
     TypedJsonAccessExpression: "TypedJsonAccessExpression",
     MapExpression: "MapExpression",
     QueryParameterExpression: "QueryParameterExpression",
+    PlaceholderExpression: "PlaceholderExpression",
     SubqueryExpression: "SubqueryExpression",
     LambdaExpression: "LambdaExpression",
     IntervalExpression: "IntervalExpression",
@@ -273,6 +274,7 @@ export const SyntaxKind = {
     Number: "Number",
     StringToken: "StringToken",
     QuotedIdentifier: "QuotedIdentifier",
+    PlaceholderToken: "PlaceholderToken",
 
     // Token kinds — Brackets
     OpeningRoundBracket: "OpeningRoundBracket",
