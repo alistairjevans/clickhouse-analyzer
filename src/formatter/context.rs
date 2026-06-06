@@ -132,6 +132,13 @@ impl<'a> FormatterContext<'a> {
     /// Write raw text directly to the buffer with no indent or spacing logic.
     /// Used for error node verbatim output.
     pub fn write_raw(&mut self, text: &str) {
+        // Honour a requested separator: write_space() only defers the space,
+        // and unlike write_token() the raw path must flush it itself —
+        // otherwise verbatim chunks (error-recovery nodes) glue onto the
+        // previous token, e.g. `FROM any` formatting as `FROMany`.
+        if !self.at_line_start && self.needs_space {
+            self.buf.push(' ');
+        }
         self.buf.push_str(text);
         if text.ends_with('\n') {
             self.at_line_start = true;

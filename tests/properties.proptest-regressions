@@ -6,3 +6,4 @@ cc 8db04aff7d41dbdea7900cfcf25e4ccc0bb08eaf6521a8c15952b7fed2c4862c # shrinks to
 cc eceff60c69655a941d82759177d7edf482c0c3eb26c9569ff9b96427c66b7688 # shrinks to input = "-\t-\"\n\"\"\tA"
 cc 51423d560a6ce18c4a7aa80ff06e75fba1d6af65ec79f9fcd3c7a1faedfec403 # shrinks to input = "''-\t- "
 cc 38f3512e12acaec81ad020c6fdbb7695e8093ee2f35ecdda1426cfe0ad64f66b # shrinks to input = "''sET\0 "
+cc 0f9b3c19ac16436af670f89f68a9ecfa201a8ed303376df32613b15219d12bff # shrinks to cols = ["a"], table = "any", has_where = false, limit = None

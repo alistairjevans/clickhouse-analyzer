@@ -950,3 +950,19 @@ ORDER BY tuple()
 SETTINGS index_granularity = 8192",
     );
 }
+
+#[test]
+fn error_recovery_nodes_keep_their_separator() {
+    // `any` is rejected as a table name (join-modifier keyword) and lands in
+    // an error-recovery node, which is emitted verbatim. The verbatim path
+    // must still honour the pending separator after FROM.
+    check_format(
+        "SELECT a FROM any",
+        expect![[r#"
+            SELECT
+                a
+            FROM any
+        "#]],
+    );
+    check_idempotent("SELECT a FROM any");
+}
