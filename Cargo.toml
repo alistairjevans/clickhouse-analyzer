@@ -38,6 +38,8 @@ required-features = ["codegen"]
 
 [profile.release]
 lto = true
+codegen-units = 1
+opt-level = 3
 
 [dev-dependencies]
 expect-test = "1"
