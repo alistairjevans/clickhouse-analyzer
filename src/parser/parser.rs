@@ -58,22 +58,19 @@ impl Parser {
         let events = self.events;
         let event_count = events.len();
 
-        // Track which event indices were already opened via forward_parent chains
+        // Track which event indices are opened as part of a forward_parent
+        // chain, so the linear walk below opens each node exactly once (from
+        // its chain head).
+        //
+        // A node is reached via a forward_parent precisely when some event
+        // points at it, so one direct pass over the fp pointers marks the
+        // whole set. (Walking each chain transitively from every node instead
+        // is O(n²) on long operator chains like `a AND b AND c AND ...`, which
+        // form a single fp chain of length n.)
         let mut opened_via_fp: Vec<bool> = vec![false; event_count];
-
-        // Pre-scan: mark all forward_parent targets so we skip them during linear walk
-        for i in 0..event_count {
-            if let Event::Open { forward_parent: Some(_), .. } = &events[i] {
-                let mut cur = i;
-                loop {
-                    match &events[cur] {
-                        Event::Open { forward_parent: Some(next), .. } => {
-                            opened_via_fp[*next as usize] = true;
-                            cur = *next as usize;
-                        }
-                        _ => break,
-                    }
-                }
+        for event in &events {
+            if let Event::Open { forward_parent: Some(next), .. } = event {
+                opened_via_fp[*next as usize] = true;
             }
         }
 
