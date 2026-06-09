@@ -20,6 +20,34 @@ pub enum SyntaxChild {
     Tree(SyntaxTree),
 }
 
+// The CST nests one level per operator in a long chain, so a query like a
+// thousands-element `IN` list expanded to `x = a OR x = b OR ...`, or a long
+// `AND` predicate list, produces a tree thousands of levels deep. The compiler's
+// derived drop glue recurses one frame per level and overflows the stack on such
+// inputs (a ~500KB query is enough). Dismantle iteratively instead: hoist every
+// descendant subtree into a flat work list and drop it there, so no SyntaxTree is
+// ever dropped while it still owns nested Tree children. Token children carry no
+// further trees, so they drop in place without recursing.
+impl Drop for SyntaxTree {
+    fn drop(&mut self) {
+        let mut stack: Vec<SyntaxTree> = Vec::new();
+        for child in std::mem::take(&mut self.children) {
+            if let SyntaxChild::Tree(tree) = child {
+                stack.push(tree);
+            }
+        }
+        while let Some(mut tree) = stack.pop() {
+            for child in std::mem::take(&mut tree.children) {
+                if let SyntaxChild::Tree(subtree) = child {
+                    stack.push(subtree);
+                }
+            }
+            // `tree` drops here with its children already emptied, so this same
+            // Drop impl re-runs as a no-op — no recursion.
+        }
+    }
+}
+
 impl SyntaxChild {
     pub fn is_token(&self) -> bool {
         matches!(self, SyntaxChild::Token(_))
