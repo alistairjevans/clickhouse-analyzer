@@ -10,10 +10,19 @@ use std::cell::Cell;
 
 const FUEL_LIMIT: u32 = 2048;
 
+/// Maximum recursive-descent nesting depth (parentheses, nested function
+/// arguments, subqueries). Long operator chains are built iteratively and do
+/// not count toward this; only genuine nesting does. Past this depth the parser
+/// emits an error instead of recursing further: unbounded recursion overflows
+/// the stack, and on WASM a stack overflow corrupts the whole module instance,
+/// not just the single parse. Matches ClickHouse's `max_parser_depth` default.
+const MAX_PARSER_DEPTH: u32 = 1000;
+
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
     fuel: Cell<u32>,
+    depth: Cell<u32>,
     events: Vec<Event>,
     errors: Vec<SyntaxError>,
     source: String,
@@ -25,10 +34,25 @@ impl Parser {
             tokens,
             pos: 0,
             fuel: Cell::new(FUEL_LIMIT),
+            depth: Cell::new(0),
             events: Vec::new(),
             errors: Vec::new(),
             source,
         }
+    }
+
+    /// Enter one level of recursive-descent nesting, returning `true` when the
+    /// depth limit has been exceeded and the caller should stop recursing.
+    /// Every call must be paired with [`leave_depth`](Self::leave_depth).
+    pub fn enter_depth(&self) -> bool {
+        let depth = self.depth.get() + 1;
+        self.depth.set(depth);
+        depth > MAX_PARSER_DEPTH
+    }
+
+    /// Leave one level of recursive-descent nesting.
+    pub fn leave_depth(&self) {
+        self.depth.set(self.depth.get().saturating_sub(1));
     }
 
     /// Returns the byte offset range of the current token,

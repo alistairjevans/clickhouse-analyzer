@@ -96,6 +96,23 @@ fn parse_expression_alias(p: &mut Parser) {
 }
 
 fn parse_expression_rec(p: &mut Parser, min_bp: u8) {
+    // Every expression recursion funnels through here, so bound the nesting
+    // depth at this one choke point. Deeply nested expressions (e.g. thousands
+    // of parentheses) would otherwise overflow the stack — and on WASM a stack
+    // overflow corrupts the whole module instance, poisoning every later parse.
+    // Past the limit, emit an error and stop descending; the error-tolerant
+    // parse degrades gracefully instead of trapping. Long operator chains are
+    // built iteratively (no recursion), so only true nesting is bounded.
+    if p.enter_depth() {
+        p.advance_with_error("Maximum expression nesting depth exceeded");
+        p.leave_depth();
+        return;
+    }
+    parse_expression_rec_inner(p, min_bp);
+    p.leave_depth();
+}
+
+fn parse_expression_rec_inner(p: &mut Parser, min_bp: u8) {
     // Handle prefix NOT: binding power 3 (between AND=2 and comparisons=3..4)
     // NOT binds tighter than AND/OR but at the same level as comparisons
     if p.at_keyword(Keyword::Not) {
@@ -888,6 +905,24 @@ mod tests {
             "Expected no errors for `{input}`, got: {:?}",
             result.errors,
         );
+    }
+
+    #[test]
+    fn bounds_deeply_nested_parentheses() {
+        // Unbounded recursion on deep nesting overflows the stack (and on WASM
+        // poisons the whole module instance). Past the depth limit the parser
+        // emits an error and stops descending rather than recursing, so the
+        // parse stays error-tolerant and never crashes.
+        let deep = format!("SELECT {}1{}", "(".repeat(5000), ")".repeat(5000));
+        let result = parse(&deep);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("nesting depth")),
+            "expected a nesting-depth error, got: {:?}",
+            result.errors,
+        );
+
+        // Ordinary nesting well under the limit still parses cleanly.
+        check_no_errors(&format!("SELECT {}1 + 2{}", "(".repeat(50), ")".repeat(50)));
     }
 
     #[test]
