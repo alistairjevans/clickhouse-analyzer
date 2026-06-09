@@ -738,6 +738,10 @@ fn at_group_by_terminator(p: &mut Parser) -> bool {
         || p.at_keyword(Keyword::With)
         || p.at_keyword(Keyword::Window)
         || p.at_keyword(Keyword::Qualify)
+        // Set operations end this SELECT's GROUP BY: `... GROUP BY a UNION ALL ...`
+        || p.at_keyword(Keyword::Union)
+        || p.at_keyword(Keyword::Except)
+        || p.at_keyword(Keyword::Intersect)
         || at_join_keyword(p)
 }
 
@@ -925,6 +929,10 @@ fn at_order_by_terminator(p: &mut Parser) -> bool {
         || p.at_keyword(Keyword::Prewhere)
         || p.at_keyword(Keyword::Having)
         || p.at_keyword(Keyword::Group)
+        // Set operations end this SELECT's ORDER BY: `... ORDER BY a UNION ALL ...`
+        || p.at_keyword(Keyword::Union)
+        || p.at_keyword(Keyword::Except)
+        || p.at_keyword(Keyword::Intersect)
         || at_join_keyword(p)
 }
 
@@ -2624,6 +2632,25 @@ mod tests {
                   'WITH'
                   'TIES'
         "#]]);
+    }
+
+    #[test]
+    fn set_operation_after_group_by_and_order_by() {
+        // GROUP BY / ORDER BY expression lists must terminate at a set-operation
+        // keyword, so a union branch ending in one of them parses cleanly.
+        for sql in [
+            "SELECT a FROM (SELECT a FROM t GROUP BY a UNION ALL SELECT a FROM t2 GROUP BY a)",
+            "SELECT a FROM (SELECT a FROM t ORDER BY a UNION ALL SELECT a FROM t2)",
+            "SELECT a FROM t GROUP BY a UNION ALL SELECT a FROM t2 GROUP BY a",
+            "SELECT a FROM t GROUP BY a EXCEPT SELECT a FROM t2 GROUP BY a",
+            "SELECT a FROM t ORDER BY a INTERSECT SELECT a FROM t2",
+        ] {
+            let result = parse(sql);
+            assert!(result.errors.is_empty(), "unexpected errors for {sql:?}: {:?}", result.errors);
+            let mut buf = String::new();
+            result.tree.print(&mut buf, 0, &result.source);
+            assert!(buf.contains("UnionClause"), "missing set operation for {sql:?}: {buf}");
+        }
     }
 
     #[test]
