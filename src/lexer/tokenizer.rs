@@ -1,8 +1,13 @@
 use crate::lexer::token::Token;
 use crate::parser::syntax_kind::SyntaxKind;
 
-/// Maximum query size (can be configured)
-const MAX_QUERY_SIZE: usize = 1_000_000; // 1MB
+/// Upper bound on input size, a backstop against pathological/adversarial input
+/// rather than a functional limit: tokenization is linear and the parser builds
+/// and drops its tree iteratively, so there is no stack or super-linear reason
+/// to bail early. Set it well above any size a consumer would actually submit
+/// (e.g. an HTTP body limit) so it never rejects an otherwise-valid query;
+/// inputs past it get a single ErrorMaxQuerySizeExceeded token.
+const MAX_QUERY_SIZE: usize = 16 * 1024 * 1024; // 16 MiB
 
 /// Tokenizer for ClickHouse SQL
 pub struct Tokenizer<'a> {
