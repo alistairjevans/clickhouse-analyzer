@@ -177,6 +177,17 @@ pub fn parse_select_statement(p: &mut Parser) {
     }
 }
 
+/// Parse a SELECT nested inside parentheses (FROM subquery, CTE, IN, scalar subquery).
+pub fn parse_nested_select_statement(p: &mut Parser) {
+    if p.enter_depth() {
+        p.advance_with_error("Maximum expression nesting depth exceeded");
+        p.leave_depth();
+        return;
+    }
+    parse_select_statement(p);
+    p.leave_depth();
+}
+
 /// True if the current position marks the end of a column list
 /// (i.e. we've hit a clause keyword or statement boundary).
 pub fn at_end_of_column_list(p: &mut Parser) -> bool {
@@ -297,7 +308,7 @@ fn parse_with_items(p: &mut Parser) {
             p.expect(SyntaxKind::OpeningRoundBracket);
             if at_select_statement(p) {
                 let subq = p.start();
-                parse_select_statement(p);
+                parse_nested_select_statement(p);
                 p.complete(subq, SyntaxKind::SubqueryExpression);
             } else {
                 parse_expression(p);
@@ -513,7 +524,7 @@ fn parse_subquery_table_ref(p: &mut Parser) {
     let m = p.start();
     p.expect(SyntaxKind::OpeningRoundBracket);
     if at_select_statement(p) {
-        parse_select_statement(p);
+        parse_nested_select_statement(p);
     } else if at_explain_statement(p) {
         parse_explain_statement(p);
     } else {
