@@ -1,6 +1,6 @@
 use crate::parser::syntax_kind::SyntaxKind;
 use crate::parser::grammar::common::parse_optional_settings_clause;
-use crate::parser::grammar::select::{at_end_of_column_list, at_select_statement, parse_select_statement};
+use crate::parser::grammar::select::{at_end_of_column_list, at_select_statement, parse_nested_select_statement};
 use crate::parser::grammar::types::parse_column_type;
 use crate::parser::interval_unit::IntervalUnit;
 use crate::parser::keyword::Keyword;
@@ -428,7 +428,7 @@ fn parse_in_rhs(p: &mut Parser) {
             // Check if it's a subquery
             if at_select_statement(p) {
                 let m = p.start();
-                parse_select_statement(p);
+                parse_nested_select_statement(p);
                 p.complete(m, SyntaxKind::SubqueryExpression);
             } else {
                 parse_expression(p);
@@ -528,7 +528,7 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
             // Subquery starting with SELECT/FROM/WITH
             else if at_select_statement(p) {
                 let m = p.start();
-                parse_select_statement(p);
+                parse_nested_select_statement(p);
                 p.complete(m, SyntaxKind::SubqueryExpression)
             }
             // Regular identifier / column reference
@@ -923,6 +923,29 @@ mod tests {
 
         // Ordinary nesting well under the limit still parses cleanly.
         check_no_errors(&format!("SELECT {}1 + 2{}", "(".repeat(50), ")".repeat(50)));
+    }
+
+    #[test]
+    fn bounds_deeply_nested_subqueries() {
+        // Use SELECT * so depth is counted by subquery nesting, not by
+        // parse_expression_rec on a literal in SELECT 1.
+        fn nested_subqueries(wrappers: usize) -> String {
+            let mut sql = "SELECT *".to_string();
+            for _ in 0..wrappers {
+                sql = format!("SELECT * FROM ({sql})");
+            }
+            sql
+        }
+
+        let deep = nested_subqueries(1001);
+        let result = parse(&deep);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("nesting depth")),
+            "expected a nesting-depth error, got: {:?}",
+            result.errors,
+        );
+
+        check_no_errors(&nested_subqueries(999));
     }
 
     #[test]
