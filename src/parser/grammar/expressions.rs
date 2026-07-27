@@ -1,6 +1,8 @@
 use crate::parser::syntax_kind::SyntaxKind;
 use crate::parser::grammar::common::parse_optional_settings_clause;
-use crate::parser::grammar::select::{at_end_of_column_list, at_select_statement, parse_select_statement};
+use crate::parser::grammar::select::{
+    at_recoverable_clause_start, at_select_statement, parse_select_statement,
+};
 use crate::parser::grammar::types::parse_column_type;
 use crate::parser::interval_unit::IntervalUnit;
 use crate::parser::keyword::Keyword;
@@ -536,7 +538,12 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
             // json.path.field).  Stops when the segment after a dot is NOT an
             // identifier — numeric tuple indices (a.1) are left for the
             // DotAccessExpression postfix handler, matching ClickHouse semantics.
-            else if !at_end_of_column_list(p) {
+            //
+            // Clause keywords are accepted here: ClickHouse keywords are
+            // non-reserved, and a clause can never start where an operand is
+            // required (`WHERE sample = 0` references a column named sample).
+            // Only an unmistakable clause start ends the expression instead.
+            else if !at_recoverable_clause_start(p) {
                 let m = p.start();
                 p.advance();
                 while p.at(SyntaxKind::Dot)

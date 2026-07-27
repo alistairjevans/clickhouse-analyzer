@@ -864,6 +864,61 @@ fn keyword_functions_in_select_with_aliases() {
 }
 
 #[test]
+fn keywords_as_aliases_and_references() {
+    // ClickHouse keywords are non-reserved: any keyword is a valid alias after
+    // an explicit AS, and a valid identifier at expression-operand position
+    // (all cases verified against clickhouse-server). Without AS, clause
+    // keywords still terminate the column list rather than acting as
+    // implicit aliases.
+    for sql in [
+        "SELECT dt AS sample FROM t1",
+        "SELECT any(substring(raw, 1, 400)) AS sample FROM t1 WHERE dt > '2026-01-01'",
+        "SELECT 1 AS prewhere, 2 AS format, 3 AS final FROM t1",
+        "SELECT 1 AS from FROM t1",
+        "WITH 1 AS sample SELECT sample",
+        "SELECT n FROM t1 ORDER BY n AS limit LIMIT 1",
+        "SELECT s FROM t1 ARRAY JOIN arr AS sample",
+        // Keyword-named identifiers referenced in expressions
+        "SELECT sample FROM t1",
+        "SELECT dt AS sample, sample + 1 FROM t1",
+        "SELECT dt AS sample FROM t1 WHERE sample = 1",
+        "SELECT dt AS sample FROM t1 GROUP BY sample",
+        "SELECT dt AS sample FROM t1 ORDER BY sample",
+        "SELECT dt AS format FROM t1 ORDER BY format",
+        "SELECT dt AS limit FROM t1 ORDER BY limit LIMIT 1",
+        "SELECT count() FROM t1 GROUP BY sample ORDER BY dt",
+    ] {
+        let result = parse(sql);
+        assert!(
+            result.errors.is_empty(),
+            "Should have no errors for {:?}, got: {:?}",
+            sql,
+            result.errors
+        );
+    }
+
+    check(
+        "SELECT dt AS sample FROM t1",
+        expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'dt'
+                    ColumnAlias
+                      'AS'
+                      'sample'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't1'
+        "#]],
+    );
+}
+
+#[test]
 fn all_as_function_name() {
     let sql = "SELECT all(col) FROM t";
     let result = parse(sql);

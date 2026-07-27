@@ -186,6 +186,51 @@ pub fn at_end_of_column_list(p: &mut Parser) -> bool {
         || p.at_keyword(Keyword::Intersect)
 }
 
+/// True when a clause keyword at expression-operand position is unmistakably
+/// the start of a clause rather than a keyword-named identifier.
+///
+/// ClickHouse keywords are non-reserved: in valid SQL a clause can never begin
+/// where an expression operand is required, so a keyword there is an
+/// identifier (`SELECT dt AS sample FROM t WHERE sample = 0` — verified
+/// against clickhouse-server). The expression parser therefore accepts clause
+/// keywords as column references, except for the shapes below, which keep
+/// error recovery working for incomplete expressions such as
+/// `SELECT a, ORDER BY b`.
+pub fn at_recoverable_clause_start(p: &mut Parser) -> bool {
+    // GROUP BY / ORDER BY — the following BY makes the clause unmistakable.
+    if (p.at_keyword(Keyword::Group) || p.at_keyword(Keyword::Order))
+        && p.nth_keyword(1, Keyword::By)
+    {
+        return true;
+    }
+    // UNION / EXCEPT / INTERSECT followed by ALL, DISTINCT, or SELECT —
+    // a set operator, not a reference to a keyword-named column.
+    if (p.at_keyword(Keyword::Union)
+        || p.at_keyword(Keyword::Except)
+        || p.at_keyword(Keyword::Intersect))
+        && (p.nth_keyword(1, Keyword::All)
+            || p.nth_keyword(1, Keyword::Distinct)
+            || p.nth_keyword(1, Keyword::Select))
+    {
+        return true;
+    }
+    false
+}
+
+/// True when the column list ends at the current token.
+///
+/// At the very start of the list the parser is at an operand position, where a
+/// clause keyword is a keyword-named identifier in valid SQL
+/// (`SELECT sample FROM t1`) unless the clause reading is unmistakable. After
+/// the first item any clause keyword terminates the list.
+fn at_column_list_end(p: &mut Parser, at_first_item: bool) -> bool {
+    if at_first_item {
+        at_recoverable_clause_start(p)
+    } else {
+        at_end_of_column_list(p)
+    }
+}
+
 const SELECT_CLAUSE_KEYWORDS: &[Keyword] = &[
     Keyword::Select, Keyword::From, Keyword::Where, Keyword::Order,
     Keyword::Limit, Keyword::Group, Keyword::Having, Keyword::Prewhere,
@@ -278,7 +323,7 @@ fn parse_with_items(p: &mut Parser) {
     let m = p.start();
 
     let mut first = true;
-    while !at_end_of_column_list(p) && !p.end_of_statement() {
+    while !at_column_list_end(p, first) && !p.end_of_statement() {
         if !first {
             p.expect(SyntaxKind::Comma);
         }
@@ -307,22 +352,7 @@ fn parse_with_items(p: &mut Parser) {
         } else {
             // Expression alias: expr AS name
             parse_expression(p);
-
-            if p.at_keyword(Keyword::As)
-                || (!at_end_of_column_list(p) && p.at(SyntaxKind::BareWord))
-                || p.at(SyntaxKind::QuotedIdentifier)
-            {
-                let am = p.start();
-                if p.at_keyword(Keyword::As) {
-                    p.expect_keyword(Keyword::As);
-                }
-                if !at_end_of_column_list(p) {
-                    p.advance();
-                } else {
-                    p.recover_with_error("Expected alias");
-                }
-                p.complete(am, SyntaxKind::ColumnAlias);
-            }
+            parse_optional_column_alias(p);
         }
     }
 
@@ -362,34 +392,42 @@ pub fn parse_column_list(p: &mut Parser) {
     let m = p.start();
 
     let mut first = true;
-    while !at_end_of_column_list(p) && !p.end_of_statement() {
+    while !at_column_list_end(p, first) && !p.end_of_statement() {
         if !first {
             p.expect(SyntaxKind::Comma);
         }
         first = false;
 
         parse_expression(p);
-
-        if p.at_keyword(Keyword::As)
-            || (!at_end_of_column_list(p) && p.at(SyntaxKind::BareWord))
-            || p.at(SyntaxKind::QuotedIdentifier)
-        {
-            let m = p.start();
-            if p.at_keyword(Keyword::As) {
-                p.expect_keyword(Keyword::As);
-            }
-
-            if !at_end_of_column_list(p) {
-                p.advance()
-            } else {
-                p.recover_with_error("Expected column alias");
-            }
-
-            p.complete(m, SyntaxKind::ColumnAlias);
-        }
+        parse_optional_column_alias(p);
     }
 
     p.complete(m, SyntaxKind::ColumnList);
+}
+
+/// Parses an optional column alias: `AS name` or a bare `name`.
+///
+/// After an explicit `AS` the next identifier is unconditionally the alias:
+/// ClickHouse accepts any keyword there (`SELECT 1 AS sample`, `... AS from`).
+/// Without `AS`, a clause keyword terminates the surrounding column list
+/// instead of acting as an implicit alias, matching ClickHouse.
+fn parse_optional_column_alias(p: &mut Parser) {
+    if p.at_keyword(Keyword::As) {
+        let m = p.start();
+        p.expect_keyword(Keyword::As);
+        if p.at_identifier() {
+            p.advance();
+        } else {
+            p.recover_with_error("Expected column alias");
+        }
+        p.complete(m, SyntaxKind::ColumnAlias);
+    } else if (!at_end_of_column_list(p) && p.at(SyntaxKind::BareWord))
+        || p.at(SyntaxKind::QuotedIdentifier)
+    {
+        let m = p.start();
+        p.advance();
+        p.complete(m, SyntaxKind::ColumnAlias);
+    }
 }
 
 /// Parses: FROM table_reference [, table_reference ...] [FINAL] [AS alias | alias]
@@ -587,11 +625,12 @@ fn parse_join_clause(p: &mut Parser) {
             }
             first = false;
             parse_expression(p);
-            // Optional alias: AS alias or bare identifier alias
+            // Optional alias: AS alias or bare identifier alias.
+            // After an explicit AS, any keyword is a valid alias in ClickHouse.
             if p.at_keyword(Keyword::As) {
                 let am = p.start();
                 p.advance(); // AS
-                if p.at_identifier() && !at_clause_keyword(p) {
+                if p.at_identifier() {
                     p.advance();
                 } else {
                     p.recover_with_error("Expected alias after AS");
@@ -801,8 +840,19 @@ fn parse_order_by_clause(p: &mut Parser) {
 
         p.complete(item_m, SyntaxKind::OrderByItem);
     } else {
+        // The first item is an operand position: a clause keyword there is a
+        // keyword-named identifier (`ORDER BY format`) unless the clause
+        // reading is unmistakable. After an item, any terminator ends the list.
         let mut first = true;
-        while !p.eof() && !p.end_of_statement() && !at_order_by_terminator(p) {
+        while !p.eof() && !p.end_of_statement() {
+            let ends_list = if first {
+                at_recoverable_clause_start(p)
+            } else {
+                at_order_by_terminator(p)
+            };
+            if ends_list {
+                break;
+            }
             if !first {
                 p.expect(SyntaxKind::Comma);
             }
@@ -832,11 +882,12 @@ fn parse_order_by_item(p: &mut Parser) {
 
     // Optional alias: AS identifier
     // ClickHouse allows aliases in ORDER BY items: ORDER BY expr AS alias
-    // Must check before ASC/DESC since AS is unambiguous here.
+    // Must check before ASC/DESC since AS is unambiguous here — any keyword
+    // is a valid alias after an explicit AS.
     if p.at_keyword(Keyword::As) {
         let am = p.start();
         p.advance(); // consume AS
-        if p.at_identifier() && !at_order_by_terminator(p) {
+        if p.at_identifier() {
             p.advance();
         } else {
             p.recover_with_error("Expected alias after AS");
