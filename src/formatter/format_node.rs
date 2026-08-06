@@ -40,7 +40,7 @@ const KEYWORDS: &[&str] = &[
     "PRECEDING", "FOLLOWING", "CURRENT", "DIV", "MOD",
     "SYNTAX", "TREE", "OVERRIDE", "ENGINES", "FOR", "PART",
     "MATERIALIZE", "SETTING", "RESET",
-    "FILL", "STEP", "INTERPOLATE", "OPTION",
+    "FILL", "STEP", "STALENESS", "INTERPOLATE", "OPTION",
     "IDENTIFIED", "HOST", "KEYED",
 ];
 
@@ -133,6 +133,8 @@ pub fn format_node(tree: &SyntaxTree, ctx: &mut FormatterContext) {
         SyntaxKind::WindowExpression => format_inline(tree, ctx),
         SyntaxKind::SampleClause => format_inline(tree, ctx),
         SyntaxKind::WithFillClause => format_inline(tree, ctx),
+        SyntaxKind::InterpolateClause => format_inline(tree, ctx),
+        SyntaxKind::InterpolateElement => format_inline(tree, ctx),
         SyntaxKind::JoinType => format_inline(tree, ctx),
         SyntaxKind::JoinConstraint => format_inline(tree, ctx),
         SyntaxKind::ColumnList => format_comma_list(tree, ctx),
@@ -556,10 +558,14 @@ fn format_order_by_clause(tree: &SyntaxTree, ctx: &mut FormatterContext) {
     let has_list = tree.children.iter().any(|c| {
         matches!(c, SyntaxChild::Tree(t) if t.kind == SyntaxKind::OrderByList)
     });
+    // Only the sort items decide the layout; a trailing INTERPOLATE clause is
+    // not one of them.
     let direct_item_count = if !has_list {
         tree.children
             .iter()
-            .filter(|c| matches!(c, SyntaxChild::Tree(_)))
+            .filter(|c| {
+                matches!(c, SyntaxChild::Tree(t) if t.kind != SyntaxKind::InterpolateClause)
+            })
             .count()
     } else {
         0

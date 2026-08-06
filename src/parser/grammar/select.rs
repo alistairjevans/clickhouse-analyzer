@@ -861,6 +861,13 @@ fn parse_order_by_clause(p: &mut Parser) {
         }
     }
 
+    // INTERPOLATE trails the whole item list, not an individual item.
+    // ClickHouse only reads it when some item has WITH FILL; accepting it
+    // unconditionally keeps recovery simple and costs nothing on valid input.
+    if p.at_keyword(Keyword::Interpolate) {
+        parse_interpolate_clause(p);
+    }
+
     p.complete(m, SyntaxKind::OrderByClause);
 }
 
@@ -910,7 +917,7 @@ fn parse_order_by_item(p: &mut Parser) {
         }
     }
 
-    // WITH FILL [FROM expr] [TO expr] [STEP expr] [INTERPOLATE (expr, ...)]
+    // WITH FILL [FROM expr] [TO expr] [STEP expr] [STALENESS expr]
     if p.at_keyword(Keyword::With) && at_with_fill(p) {
         parse_with_fill_clause(p);
     }
@@ -925,7 +932,7 @@ fn at_with_fill(p: &mut Parser) -> bool {
         && p.nth_text(1).eq_ignore_ascii_case("FILL")
 }
 
-/// Parses: WITH FILL [FROM expr] [TO expr] [STEP expr] [INTERPOLATE (expr, ...)]
+/// Parses: WITH FILL [FROM expr] [TO expr] [STEP expr] [STALENESS expr]
 fn parse_with_fill_clause(p: &mut Parser) {
     let m = p.start();
     p.expect_keyword(Keyword::With);
@@ -949,29 +956,79 @@ fn parse_with_fill_clause(p: &mut Parser) {
         parse_expression(p);
     }
 
-    // Optional INTERPOLATE (expr, ...)
-    if p.at_keyword(Keyword::Interpolate) {
+    // Optional STALENESS expr
+    if p.at_keyword(Keyword::Staleness) {
         p.advance();
-        if p.at(SyntaxKind::OpeningRoundBracket) {
-            p.advance(); // (
-            let mut first = true;
-            while !p.at(SyntaxKind::ClosingRoundBracket) && !p.eof() && !p.end_of_statement() {
-                if !first {
-                    p.expect(SyntaxKind::Comma);
-                }
-                first = false;
-                parse_expression(p);
-            }
-            p.expect(SyntaxKind::ClosingRoundBracket);
-        }
+        parse_expression(p);
     }
 
     p.complete(m, SyntaxKind::WithFillClause);
 }
 
+/// Parses: INTERPOLATE [ ( elem [, elem]... ) ]
+///
+/// Bare `INTERPOLATE` (no parens) means "interpolate nothing"; the
+/// parenthesised form lists the columns to carry into filled rows.
+fn parse_interpolate_clause(p: &mut Parser) {
+    let m = p.start();
+    p.expect_keyword(Keyword::Interpolate);
+
+    if p.at(SyntaxKind::OpeningRoundBracket) {
+        p.advance(); // (
+        let mut first = true;
+        while !p.at(SyntaxKind::ClosingRoundBracket) && !p.eof() && !p.end_of_statement() {
+            if !first {
+                p.expect(SyntaxKind::Comma);
+            }
+            first = false;
+            parse_interpolate_element(p);
+        }
+        p.expect(SyntaxKind::ClosingRoundBracket);
+    }
+
+    p.complete(m, SyntaxKind::InterpolateClause);
+}
+
+/// Parses one INTERPOLATE element: `column [AS expr]`.
+///
+/// The AS here is not an alias — it reads the other way round from the rest of
+/// SQL, naming an existing column on the left and the expression that produces
+/// its filled value on the right. `col` alone is shorthand for `col AS col`.
+///
+fn parse_interpolate_element(p: &mut Parser) {
+    if !p.at_identifier() {
+        // An empty element leaves the separator for the caller to consume;
+        // anything else is skipped up to the next one so the closing paren —
+        // and every clause after it — still parses.
+        if p.at(SyntaxKind::Comma) {
+            p.recover_with_error("Expected column name in INTERPOLATE list");
+            return;
+        }
+        p.advance_with_error("Expected column name in INTERPOLATE list");
+        while !p.at(SyntaxKind::Comma) && !p.eof() && !p.end_of_statement() {
+            p.advance();
+        }
+        return;
+    }
+
+    let m = p.start();
+
+    let cm = p.start();
+    p.advance();
+    p.complete(cm, SyntaxKind::ColumnReference);
+
+    if p.at_keyword(Keyword::As) {
+        p.advance();
+        parse_expression(p);
+    }
+
+    p.complete(m, SyntaxKind::InterpolateElement);
+}
+
 /// Keywords that terminate an ORDER BY item list.
 fn at_order_by_terminator(p: &mut Parser) -> bool {
-    p.at_keyword(Keyword::Limit)
+    p.at_keyword(Keyword::Interpolate)
+        || p.at_keyword(Keyword::Limit)
         || p.at_keyword(Keyword::Settings)
         || (p.at_keyword(Keyword::Format) && !p.at_followed_by_paren())
         || p.at_keyword(Keyword::Select)
@@ -2660,6 +2717,303 @@ mod tests {
                       NumberLiteral
                         '1'
         "#]]);
+    }
+
+    #[test]
+    fn with_fill_staleness() {
+        check("SELECT date FROM t ORDER BY date WITH FILL STEP 1 STALENESS 5", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'date'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'date'
+                    WithFillClause
+                      'WITH'
+                      'FILL'
+                      'STEP'
+                      NumberLiteral
+                        '1'
+                      'STALENESS'
+                      NumberLiteral
+                        '5'
+        "#]]);
+    }
+
+    #[test]
+    fn with_fill_bare_interpolate() {
+        check("SELECT date, x FROM t ORDER BY date WITH FILL INTERPOLATE", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'date'
+                    ','
+                    ColumnReference
+                      'x'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'date'
+                    WithFillClause
+                      'WITH'
+                      'FILL'
+                  InterpolateClause
+                    'INTERPOLATE'
+        "#]]);
+    }
+
+    #[test]
+    fn with_fill_interpolate_single_column() {
+        check("SELECT date, x FROM t ORDER BY date WITH FILL INTERPOLATE (x)", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'date'
+                    ','
+                    ColumnReference
+                      'x'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'date'
+                    WithFillClause
+                      'WITH'
+                      'FILL'
+                  InterpolateClause
+                    'INTERPOLATE'
+                    '('
+                    InterpolateElement
+                      ColumnReference
+                        'x'
+                    ')'
+        "#]]);
+    }
+
+    #[test]
+    fn with_fill_interpolate_as_expression() {
+        // The AS in INTERPOLATE reads backwards from an alias: the column being
+        // interpolated is on the left, the filling expression on the right.
+        check("SELECT date, x FROM t ORDER BY date WITH FILL INTERPOLATE (x AS x + 1)", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'date'
+                    ','
+                    ColumnReference
+                      'x'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'date'
+                    WithFillClause
+                      'WITH'
+                      'FILL'
+                  InterpolateClause
+                    'INTERPOLATE'
+                    '('
+                    InterpolateElement
+                      ColumnReference
+                        'x'
+                      'AS'
+                      BinaryExpression
+                        ColumnReference
+                          'x'
+                        '+'
+                        NumberLiteral
+                          '1'
+                    ')'
+        "#]]);
+    }
+
+    #[test]
+    fn with_fill_interpolate_multiple_elements() {
+        check("SELECT date, x, s FROM t ORDER BY date WITH FILL INTERPOLATE (x, s AS 'const')", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'date'
+                    ','
+                    ColumnReference
+                      'x'
+                    ','
+                    ColumnReference
+                      's'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'date'
+                    WithFillClause
+                      'WITH'
+                      'FILL'
+                  InterpolateClause
+                    'INTERPOLATE'
+                    '('
+                    InterpolateElement
+                      ColumnReference
+                        'x'
+                    ','
+                    InterpolateElement
+                      ColumnReference
+                        's'
+                      'AS'
+                      StringLiteral
+                        ''const''
+                    ')'
+        "#]]);
+    }
+
+    #[test]
+    fn with_fill_full_range_then_interpolate() {
+        check(
+            "SELECT date, s FROM t ORDER BY date WITH FILL FROM 0 TO 100 STEP 1 INTERPOLATE (s AS 'placeholder')",
+            expect![[r#"
+                File
+                  SelectStatement
+                    SelectClause
+                      'SELECT'
+                      ColumnList
+                        ColumnReference
+                          'date'
+                        ','
+                        ColumnReference
+                          's'
+                    FromClause
+                      'FROM'
+                      TableIdentifier
+                        't'
+                    OrderByClause
+                      'ORDER'
+                      'BY'
+                      OrderByItem
+                        ColumnReference
+                          'date'
+                        WithFillClause
+                          'WITH'
+                          'FILL'
+                          'FROM'
+                          NumberLiteral
+                            '0'
+                          'TO'
+                          NumberLiteral
+                            '100'
+                          'STEP'
+                          NumberLiteral
+                            '1'
+                      InterpolateClause
+                        'INTERPOLATE'
+                        '('
+                        InterpolateElement
+                          ColumnReference
+                            's'
+                          'AS'
+                          StringLiteral
+                            ''placeholder''
+                        ')'
+            "#]],
+        );
+    }
+
+    #[test]
+    fn interpolate_after_multiple_order_by_items() {
+        // INTERPOLATE trails the whole list, so the item loop must stop at it
+        // rather than demanding another comma.
+        check("SELECT a, b, x FROM t ORDER BY a, b WITH FILL INTERPOLATE (x)", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    ColumnReference
+                      'a'
+                    ','
+                    ColumnReference
+                      'b'
+                    ','
+                    ColumnReference
+                      'x'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'a'
+                  ','
+                  OrderByItem
+                    ColumnReference
+                      'b'
+                    WithFillClause
+                      'WITH'
+                      'FILL'
+                  InterpolateClause
+                    'INTERPOLATE'
+                    '('
+                    InterpolateElement
+                      ColumnReference
+                        'x'
+                    ')'
+        "#]]);
+    }
+
+    #[test]
+    fn malformed_interpolate_list_recovers() {
+        // A non-identifier where a column name belongs is reported once and the
+        // rest of the statement still parses.
+        let result = parse("SELECT date, x FROM t ORDER BY date WITH FILL INTERPOLATE (1 + 2) LIMIT 5");
+        assert!(!result.errors.is_empty(), "expected an error for a non-identifier INTERPOLATE element");
+        let mut buf = String::new();
+        result.tree.print(&mut buf, 0, &result.source);
+        assert!(buf.contains("LimitClause"), "statement after INTERPOLATE should still parse:\n{buf}");
     }
 
     #[test]

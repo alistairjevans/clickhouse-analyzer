@@ -71,6 +71,8 @@ pub enum SyntaxKind {
     QualifyClause,
     SampleClause,
     WithFillClause,
+    InterpolateClause,
+    InterpolateElement,
 
     // =======================================================================
     // CREATE TABLE components

@@ -273,6 +273,7 @@ pub enum Keyword {
     // WITH FILL
     Fill,
     Step,
+    Staleness,
     Interpolate,
 
     // Access control keywords
@@ -536,6 +537,7 @@ impl Keyword {
             Keyword::Mod => "MOD",
             Keyword::Fill => "FILL",
             Keyword::Step => "STEP",
+            Keyword::Staleness => "STALENESS",
             Keyword::Interpolate => "INTERPOLATE",
             Keyword::Identified => "IDENTIFIED",
             Keyword::Host => "HOST",
