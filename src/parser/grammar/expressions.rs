@@ -527,6 +527,18 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
                 p.expect(SyntaxKind::ClosingRoundBracket);
                 p.complete(m, SyntaxKind::CastExpression)
             }
+            // TRIM([BOTH|LEADING|TRAILING] [chars] FROM str) — the SQL-standard
+            // spelling, which ClickHouse accepts alongside plain trim(str).
+            // ltrim/rtrim take no keywords (their side is already fixed), so
+            // only `trim` needs the special form.
+            else if p.at_keyword(Keyword::Trim) && p.nth(1) == SyntaxKind::OpeningRoundBracket {
+                let m = p.start();
+                let name = p.start();
+                p.advance(); // consume TRIM
+                p.complete(name, SyntaxKind::Identifier);
+                parse_trim_args(p);
+                p.complete(m, SyntaxKind::FunctionCall)
+            }
             // INTERVAL expression
             else if p.at_keyword(Keyword::Interval) {
                 let m = p.start();
@@ -782,6 +794,44 @@ fn arg(p: &mut Parser) {
     parse_expression_alias(p);
 
     p.complete(m, SyntaxKind::Expression);
+}
+
+/// Parses TRIM's argument list, which is keyword-separated rather than
+/// comma-separated:
+///   trim(str)
+///   trim(FROM str)
+///   trim(BOTH|LEADING|TRAILING [chars] FROM str)
+///
+/// A side keyword commits the call to the FROM form (ClickHouse's TrimLayer
+/// sets `char_override` and then requires FROM), so a missing FROM is reported
+/// rather than silently accepted.
+fn parse_trim_args(p: &mut Parser) {
+    let m = p.start();
+    p.expect(SyntaxKind::OpeningRoundBracket);
+
+    let sided = p.eat_keyword(Keyword::Both)
+        || p.eat_keyword(Keyword::Leading)
+        || p.eat_keyword(Keyword::Trailing);
+
+    // The characters to strip, present only in the FROM form and optional even
+    // there (`trim(BOTH FROM x)` strips whitespace).
+    if !p.at_keyword(Keyword::From)
+        && !p.at(SyntaxKind::ClosingRoundBracket)
+        && !p.eof()
+        && !p.end_of_statement()
+    {
+        arg(p);
+    }
+
+    if sided {
+        p.expect_keyword(Keyword::From);
+        arg(p);
+    } else if p.eat_keyword(Keyword::From) {
+        arg(p);
+    }
+
+    p.expect(SyntaxKind::ClosingRoundBracket);
+    p.complete(m, SyntaxKind::ExpressionList);
 }
 
 /// Parses a parenthesized argument list for column transformers (APPLY, EXCEPT, REPLACE).
@@ -1583,6 +1633,53 @@ mod tests {
                       StringLiteral
                         ''%test%''
         "#]]);
+    }
+
+    #[test]
+    fn trim_with_side_keyword() {
+        check("SELECT trim(BOTH ' ' FROM x)", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    FunctionCall
+                      Identifier
+                        'trim'
+                      ExpressionList
+                        '('
+                        'BOTH'
+                        Expression
+                          StringLiteral
+                            '' ''
+                        'FROM'
+                        Expression
+                          ColumnReference
+                            'x'
+                        ')'
+        "#]]);
+    }
+
+    #[test]
+    fn trim_variants() {
+        check_no_errors("SELECT trim(x)");
+        check_no_errors("SELECT trim(FROM x)");
+        check_no_errors("SELECT trim(BOTH FROM x)");
+        check_no_errors("SELECT trim(LEADING 'x' FROM y)");
+        check_no_errors("SELECT trim(TRAILING 'x' FROM y)");
+        // ltrim/rtrim have no side keyword to parse; they stay ordinary calls.
+        check_no_errors("SELECT ltrim(x), rtrim(x)");
+    }
+
+    #[test]
+    fn trim_side_keyword_requires_from() {
+        // ClickHouse commits to the FROM form once a side keyword is seen.
+        let result = parse("SELECT trim(BOTH ' ' x)");
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("FROM")),
+            "expected a missing-FROM error, got: {:?}",
+            result.errors,
+        );
     }
 
     #[test]

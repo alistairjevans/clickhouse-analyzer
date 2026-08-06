@@ -292,6 +292,12 @@ pub enum Keyword {
     Ignore,
     Respect,
 
+    // TRIM(BOTH|LEADING|TRAILING ... FROM ...)
+    Trim,
+    Both,
+    Leading,
+    Trailing,
+
     // GROUPING SETS
     Grouping,
     Sets,
@@ -546,6 +552,10 @@ impl Keyword {
             Keyword::Keyed => "KEYED",
             Keyword::Recursive => "RECURSIVE",
             Keyword::Skip => "SKIP",
+            Keyword::Trim => "TRIM",
+            Keyword::Both => "BOTH",
+            Keyword::Leading => "LEADING",
+            Keyword::Trailing => "TRAILING",
             Keyword::Ignore => "IGNORE",
             Keyword::Respect => "RESPECT",
             Keyword::Grouping => "GROUPING",
