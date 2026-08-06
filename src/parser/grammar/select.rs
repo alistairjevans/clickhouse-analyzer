@@ -787,19 +787,16 @@ fn at_group_by_terminator(p: &mut Parser) -> bool {
 // ========== WINDOW ==========
 
 /// Parses: WINDOW name AS ( window_spec ) [, name AS ( window_spec ) ...]
+///
+/// The definition list is delimited by commas alone (ClickHouse's
+/// `ParserWindowList`), so whatever follows the last `)` belongs to the next
+/// clause. Scanning to a terminator keyword instead would swallow the ORDER BY
+/// that legally follows WINDOW.
 fn parse_window_clause(p: &mut Parser) {
     let m = p.start();
     p.expect_keyword(Keyword::Window);
 
-    let mut first = true;
-    while !p.eof() && !p.end_of_statement() && !at_order_by_terminator(p)
-        && !p.at_keyword(Keyword::Window)
-    {
-        if !first {
-            p.expect(SyntaxKind::Comma);
-        }
-        first = false;
-
+    loop {
         let wm = p.start();
         // window name
         if p.at_identifier() {
@@ -810,6 +807,10 @@ fn parse_window_clause(p: &mut Parser) {
         p.expect_keyword(Keyword::As);
         parse_window_spec(p);
         p.complete(wm, SyntaxKind::WindowDefinition);
+
+        if p.eof() || p.end_of_statement() || !p.eat(SyntaxKind::Comma) {
+            break;
+        }
     }
 
     p.complete(m, SyntaxKind::WindowClause);
@@ -1173,6 +1174,15 @@ mod tests {
         let mut buf = String::new();
         result.tree.print(&mut buf, 0, &result.source);
         expected.assert_eq(&buf);
+    }
+
+    fn check_no_errors(input: &str) {
+        let result = parse(input);
+        assert!(
+            result.errors.is_empty(),
+            "Expected no errors for `{input}`, got: {:?}",
+            result.errors,
+        );
     }
 
     #[test]
@@ -2586,6 +2596,87 @@ mod tests {
                         'z'
                       ')'
         "#]]);
+    }
+
+    #[test]
+    fn window_clause_followed_by_order_by() {
+        // ORDER BY legally follows WINDOW; the definition list must stop at the
+        // last `)` rather than reading the ORDER BY as another definition.
+        check("SELECT avg(x) OVER w FROM t WINDOW w AS (PARTITION BY a ORDER BY b RANGE BETWEEN 300 PRECEDING AND CURRENT ROW) ORDER BY b", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    WindowExpression
+                      FunctionCall
+                        Identifier
+                          'avg'
+                        ExpressionList
+                          '('
+                          Expression
+                            ColumnReference
+                              'x'
+                          ')'
+                      'OVER'
+                      'w'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+                WindowClause
+                  'WINDOW'
+                  WindowDefinition
+                    'w'
+                    'AS'
+                    WindowSpec
+                      '('
+                      'PARTITION'
+                      'BY'
+                      ColumnReference
+                        'a'
+                      'ORDER'
+                      'BY'
+                      ColumnReference
+                        'b'
+                      WindowFrame
+                        'RANGE'
+                        'BETWEEN'
+                        NumberLiteral
+                          '300'
+                        'PRECEDING'
+                        'AND'
+                        'CURRENT'
+                        'ROW'
+                      ')'
+                OrderByClause
+                  'ORDER'
+                  'BY'
+                  OrderByItem
+                    ColumnReference
+                      'b'
+        "#]]);
+    }
+
+    #[test]
+    fn window_clause_multiple_definitions_then_limit() {
+        check_no_errors(
+            "SELECT avg(x) OVER w, sum(y) OVER v FROM t \
+             WINDOW w AS (PARTITION BY a), v AS (ORDER BY b) ORDER BY a LIMIT 1",
+        );
+    }
+
+    #[test]
+    fn window_clause_truncated_recovers() {
+        // Error tolerance: a WINDOW with no definition after it reports the
+        // missing pieces once and stops, instead of scanning to end of input.
+        let result = parse("SELECT avg(x) OVER w FROM t WINDOW");
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("Expected window name")),
+            "expected a missing-name error, got: {:?}",
+            result.errors,
+        );
+        assert!(result.errors.len() <= 4, "unbounded recovery: {:?}", result.errors);
     }
 
     #[test]
