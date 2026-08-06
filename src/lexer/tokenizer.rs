@@ -111,6 +111,13 @@ impl<'a> Tokenizer<'a> {
             return self.read_single_line_comment();
         }
 
+        // MySQL-style single-line comment. ClickHouse recognizes it only when
+        // the `#` is followed by a space or `!` (the shebang case), so that
+        // `#hello` stays available to whatever else may use the character.
+        if c == '#' && self.peek().is_some_and(|c| c == ' ' || c == '!') {
+            return self.read_single_line_comment();
+        }
+
         if c == '/' && self.match_char('*') {
             return self.read_multi_line_comment();
         }
@@ -798,6 +805,24 @@ mod tests {
 
         assert_eq!(tokens[11].kind, SyntaxKind::Number);
         assert_eq!(tokens[11].text(sql), "5");
+    }
+
+    #[test]
+    fn test_hash_line_comment() {
+        let sql = "SELECT 1 # a comment\nFROM t";
+        let tokens = tokenize_with_whitespace(sql);
+        let comment = tokens.iter().find(|t| t.kind == SyntaxKind::Comment).unwrap();
+        assert_eq!(comment.text(sql), "# a comment");
+
+        let sql = "#!/usr/bin/clickhouse-local\nSELECT 1";
+        let tokens = tokenize_with_whitespace(sql);
+        assert_eq!(tokens[0].kind, SyntaxKind::Comment);
+        assert_eq!(tokens[0].text(sql), "#!/usr/bin/clickhouse-local");
+
+        // `#` not followed by a space or `!` is not a comment.
+        let sql = "SELECT 1 #hello";
+        let tokens = tokenize_with_whitespace(sql);
+        assert!(!tokens.iter().any(|t| t.kind == SyntaxKind::Comment));
     }
 
     #[test]
