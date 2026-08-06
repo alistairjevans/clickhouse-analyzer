@@ -771,6 +771,13 @@ fn arg(p: &mut Parser) {
         return;
     }
 
+    // An argument may carry an alias that names the subexpression for the rest
+    // of the query: `concat(f(x) AS country, ' - ', g(y))`. ClickHouse parses
+    // argument lists as expressions with an OPTIONAL alias, but only the
+    // explicit `AS` form — a bare word after an argument is a syntax error
+    // there — which is exactly what `parse_expression_alias` accepts.
+    parse_expression_alias(p);
+
     p.complete(m, SyntaxKind::Expression);
 }
 
@@ -1573,6 +1580,60 @@ mod tests {
                       StringLiteral
                         ''%test%''
         "#]]);
+    }
+
+    #[test]
+    fn alias_on_a_function_argument() {
+        check("SELECT concat(f(x) AS country, ' - ')", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    FunctionCall
+                      Identifier
+                        'concat'
+                      ExpressionList
+                        '('
+                        Expression
+                          FunctionCall
+                            Identifier
+                              'f'
+                            ExpressionList
+                              '('
+                              Expression
+                                ColumnReference
+                                  'x'
+                              ')'
+                          ColumnAlias
+                            'AS'
+                            'country'
+                        ','
+                        Expression
+                          StringLiteral
+                            '' - ''
+                        ')'
+        "#]]);
+    }
+
+    #[test]
+    fn argument_alias_requires_as() {
+        // ClickHouse accepts only the explicit `AS` form inside an argument
+        // list; a bare word there is a syntax error on the server too, so the
+        // parser must not silently absorb it as an alias.
+        let result = parse("SELECT concat(f(x) country, ' - ')");
+        assert!(
+            !result.errors.is_empty(),
+            "expected an error for a bare argument alias",
+        );
+
+        // Error tolerance: a dangling AS reports once and keeps the call intact.
+        let result = parse("SELECT concat(f(x) AS, 'y')");
+        assert!(
+            result.errors.len() == 1,
+            "expected exactly one error, got: {:?}",
+            result.errors,
+        );
     }
 
     #[test]
