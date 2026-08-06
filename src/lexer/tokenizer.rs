@@ -16,6 +16,11 @@ pub struct Tokenizer<'a> {
     position: usize,
     start: usize,
     include_whitespace: bool,
+    /// Kind of the last significant (non-trivia) token, mirroring ClickHouse's
+    /// `Lexer::prev_significant_token_type`. A `.` is a tuple-access operator or
+    /// a floating-point literal depending on what precedes it, and that is the
+    /// only thing that tells the two apart.
+    prev_significant: Option<SyntaxKind>,
 }
 
 impl<'a> Tokenizer<'a> {
@@ -33,6 +38,7 @@ impl<'a> Tokenizer<'a> {
             position: 0,
             start: 0,
             include_whitespace: true, // Default to including whitespace
+            prev_significant: None,
         }
     }
 
@@ -75,6 +81,14 @@ impl<'a> Tokenizer<'a> {
 
     /// Get the next token
     pub fn next_token(&mut self) -> Token {
+        let token = self.next_token_impl();
+        if token.kind != SyntaxKind::Whitespace && token.kind != SyntaxKind::Comment {
+            self.prev_significant = Some(token.kind);
+        }
+        token
+    }
+
+    fn next_token_impl(&mut self) -> Token {
         self.start = self.position;
 
         // Check for end of input
@@ -140,7 +154,13 @@ impl<'a> Tokenizer<'a> {
             // Punctuation
             ',' => self.create_token(SyntaxKind::Comma),
             ';' => self.create_token(SyntaxKind::Semicolon),
-            '.' => self.create_token(SyntaxKind::Dot),
+            '.' => {
+                if self.at_leading_dot_number() {
+                    self.read_leading_dot_number()
+                } else {
+                    self.create_token(SyntaxKind::Dot)
+                }
+            }
 
             // Operators and symbols
             '*' => self.create_token(SyntaxKind::Star),
@@ -359,6 +379,59 @@ impl<'a> Tokenizer<'a> {
         }
 
         // Check if followed by identifier characters
+        if !self.is_at_end() && self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
+            return self.read_identifier_starting_with_number();
+        }
+
+        self.create_token(SyntaxKind::Number)
+    }
+
+    /// True when the `.` just consumed starts a floating-point literal rather
+    /// than a qualifier / tuple-access operator.
+    ///
+    /// ClickHouse's rule (`Lexer::nextTokenImpl`, case '.'): the dot is an
+    /// operator when it is not the first character of the query AND either it
+    /// is not followed by a digit, or the previous significant token is one a
+    /// member access can follow — `)`, `]`, an identifier, or a number (which
+    /// is what makes chained tuple access `x.1.1` work).
+    fn at_leading_dot_number(&self) -> bool {
+        if self.start == 0 {
+            return true;
+        }
+        if !self.peek().is_some_and(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        !matches!(
+            self.prev_significant,
+            Some(
+                SyntaxKind::ClosingRoundBracket
+                    | SyntaxKind::ClosingSquareBracket
+                    | SyntaxKind::BareWord
+                    | SyntaxKind::QuotedIdentifier
+                    | SyntaxKind::Number
+            )
+        )
+    }
+
+    /// Read a floating-point literal whose leading `.` has been consumed: `.1`,
+    /// `.5e3`. Same tail as `read_number`'s decimal branch.
+    fn read_leading_dot_number(&mut self) -> Token {
+        self.read_digits();
+
+        if self.peek().is_some_and(|c| c == 'e' || c == 'E') {
+            self.advance(); // consume e/E
+
+            if self.peek_is('+') || self.peek_is('-') {
+                self.advance();
+            }
+
+            if !self.current_char_is_digit() {
+                return self.create_token(SyntaxKind::ErrorWrongNumber);
+            }
+
+            self.read_digits();
+        }
+
         if !self.is_at_end() && self.peek().is_some_and(|c| c.is_alphabetic() || c == '_') {
             return self.read_identifier_starting_with_number();
         }
@@ -725,6 +798,40 @@ mod tests {
 
         assert_eq!(tokens[11].kind, SyntaxKind::Number);
         assert_eq!(tokens[11].text(sql), "5");
+    }
+
+    #[test]
+    fn test_leading_dot_number() {
+        // After an operator the dot starts a literal...
+        let sql = "SELECT x * .1";
+        let tokens = tokenize(sql);
+        assert_eq!(tokens[3].kind, SyntaxKind::Number);
+        assert_eq!(tokens[3].text(sql), ".1");
+
+        // ...at the very start of the query too.
+        let sql = ".5";
+        let tokens = tokenize(sql);
+        assert_eq!(tokens[0].kind, SyntaxKind::Number);
+        assert_eq!(tokens[0].text(sql), ".5");
+
+        let sql = "SELECT (a + b) * .25e1";
+        let tokens = tokenize(sql);
+        assert_eq!(tokens.last().unwrap().kind, SyntaxKind::Number);
+        assert_eq!(tokens.last().unwrap().text(sql), ".25e1");
+    }
+
+    #[test]
+    fn test_dot_after_identifier_or_number_stays_an_operator() {
+        // Tuple access and qualified names must keep lexing as Dot, including
+        // the chained form `x.1.1` where the previous token is a number.
+        for sql in ["x.1", "x.1.1", "system.numbers", "f(x).1", "arr[1].2"] {
+            let tokens = tokenize(sql);
+            assert!(
+                tokens.iter().any(|t| t.kind == SyntaxKind::Dot),
+                "expected a Dot token in `{sql}`, got {:?}",
+                tokens.iter().map(|t| (t.kind, t.text(sql))).collect::<Vec<_>>(),
+            );
+        }
     }
 
     #[test]

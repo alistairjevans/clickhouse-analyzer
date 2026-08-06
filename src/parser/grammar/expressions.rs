@@ -1576,6 +1576,41 @@ mod tests {
     }
 
     #[test]
+    fn leading_dot_number() {
+        check("SELECT x * .1", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    BinaryExpression
+                      ColumnReference
+                        'x'
+                      '*'
+                      NumberLiteral
+                        '.1'
+        "#]]);
+        check_no_errors("SELECT ((logins * .1) - orders) AS value FROM t");
+    }
+
+    #[test]
+    fn tuple_access_is_not_a_leading_dot_number() {
+        check("SELECT x.1", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    DotAccessExpression
+                      ColumnReference
+                        'x'
+                      '.'
+                      '1'
+        "#]]);
+        check_no_errors("SELECT x.1.1, f(x).1 FROM t");
+    }
+
+    #[test]
     fn regexp_expression() {
         check("SELECT x REGEXP '^/v1/.*'", expect![[r#"
             File
