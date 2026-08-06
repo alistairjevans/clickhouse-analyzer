@@ -232,6 +232,13 @@ pub fn parse_show_statement(p: &mut Parser) {
         p.recover_with_error("Expected target after SHOW");
     }
 
+    // Every SHOW is a query with output, so any of them can carry a FORMAT
+    // clause (ClickHouse's ParserQueryWithOutput). It belongs to the statement
+    // rather than to one target's parser.
+    if p.at_keyword(Keyword::Format) {
+        parse_format_clause(p);
+    }
+
     p.complete(m, SyntaxKind::ShowStatement);
 }
 
@@ -319,13 +326,10 @@ fn parse_show_create(p: &mut Parser) {
         parse_table_ref(p);
     }
 
-    // Consume remaining tokens (e.g. ON table for ROW POLICY)
+    // Consume remaining tokens (e.g. ON table for ROW POLICY), stopping at the
+    // statement-level FORMAT clause.
     while !p.eof() && !p.end_of_statement() && !p.at_keyword(Keyword::Format) {
         p.advance();
-    }
-
-    if p.at_keyword(Keyword::Format) {
-        parse_format_clause(p);
     }
 
     p.complete(m, SyntaxKind::ShowTarget);
@@ -362,15 +366,10 @@ fn parse_show_columns(p: &mut Parser) {
     p.complete(m, SyntaxKind::ShowTarget);
 }
 
-/// SHOW PROCESSLIST [FORMAT format]
+/// SHOW PROCESSLIST
 fn parse_show_processlist(p: &mut Parser) {
     let m = p.start();
     p.advance(); // PROCESSLIST
-
-    if p.at_keyword(Keyword::Format) {
-        parse_format_clause(p);
-    }
-
     p.complete(m, SyntaxKind::ShowTarget);
 }
 
@@ -977,6 +976,50 @@ mod tests {
     fn show_databases_like() {
         check_no_errors("SHOW DATABASES LIKE '%test%'");
         check_roundtrip("SHOW DATABASES LIKE '%test%'");
+    }
+
+    #[test]
+    fn show_grants_with_format() {
+        check(
+            "SHOW GRANTS FORMAT TSVRaw",
+            expect![[r#"
+                File
+                  ShowStatement
+                    'SHOW'
+                    ShowTarget
+                      'GRANTS'
+                    FormatClause
+                      'FORMAT'
+                      'TSVRaw'
+            "#]],
+        );
+    }
+
+    #[test]
+    fn every_show_target_accepts_format() {
+        for input in [
+            "SHOW TABLES FORMAT JSON",
+            "SHOW DATABASES FORMAT JSON",
+            "SHOW CREATE TABLE t FORMAT TSVRaw",
+            "SHOW PROCESSLIST FORMAT JSON",
+            "SHOW PRIVILEGES FORMAT JSON",
+            "SHOW GRANTS FOR bob FORMAT JSON",
+            "SHOW SETTINGS LIKE 'x' FORMAT JSON",
+        ] {
+            check_no_errors(input);
+            check_roundtrip(input);
+        }
+    }
+
+    #[test]
+    fn show_with_dangling_format_recovers() {
+        let result = parse("SHOW GRANTS FORMAT");
+        assert_eq!(
+            result.errors.len(),
+            1,
+            "expected one error, got: {:?}",
+            result.errors,
+        );
     }
 
     // -----------------------------------------------------------------------
