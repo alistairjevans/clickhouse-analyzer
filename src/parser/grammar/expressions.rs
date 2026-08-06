@@ -370,6 +370,20 @@ fn parse_expression_postfix(p: &mut Parser, mut lhs: CompletedMarker, min_bp: u8
             continue;
         }
 
+        // REGEXP — infix, binding power 4, the same level as LIKE (ClickHouse
+        // maps it to `match`). It is its own node rather than a LikeExpression:
+        // the right operand is a regular expression, not a LIKE pattern, and
+        // consumers that read the pattern must not confuse the two. There is no
+        // `NOT REGEXP` — ClickHouse's operator table has no such entry, and the
+        // server rejects it — so NOT is deliberately not accepted here.
+        if p.at_keyword(Keyword::Regexp) && 4 > min_bp {
+            let m = p.precede(lhs);
+            p.advance(); // consume REGEXP
+            parse_expression_rec(p, 4);
+            lhs = p.complete(m, SyntaxKind::MatchExpression);
+            continue;
+        }
+
         // Binary operators via Pratt precedence climbing
         let Some(op) = BinOp::from_parser(p) else {
             break;
@@ -1559,6 +1573,66 @@ mod tests {
                       StringLiteral
                         ''%test%''
         "#]]);
+    }
+
+    #[test]
+    fn regexp_expression() {
+        check("SELECT x REGEXP '^/v1/.*'", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    MatchExpression
+                      ColumnReference
+                        'x'
+                      'REGEXP'
+                      StringLiteral
+                        ''^/v1/.*''
+        "#]]);
+    }
+
+    #[test]
+    fn regexp_binds_like_a_comparison() {
+        // Binding power 4, the same as LIKE: AND splits the two operands rather
+        // than being swallowed by the right-hand side.
+        check_no_errors("SELECT * FROM t WHERE a REGEXP 'x' AND b = 1");
+        check("SELECT a REGEXP 'x' AND b", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    BinaryExpression
+                      MatchExpression
+                        ColumnReference
+                          'a'
+                        'REGEXP'
+                        StringLiteral
+                          ''x''
+                      'AND'
+                      ColumnReference
+                        'b'
+        "#]]);
+    }
+
+    #[test]
+    fn regexp_without_pattern_recovers() {
+        // Error tolerance: a REGEXP with nothing to its right reports one error
+        // and still yields a tree covering the rest of the statement.
+        let result = parse("SELECT * FROM t WHERE a REGEXP");
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("Expected expression")),
+            "expected a missing-operand error, got: {:?}",
+            result.errors,
+        );
+    }
+
+    #[test]
+    fn regexp_as_a_column_name() {
+        // REGEXP is not reserved: at operand position it is still an identifier.
+        check_no_errors("SELECT regexp FROM t");
+        check_no_errors("SELECT 1 AS regexp");
     }
 
     #[test]

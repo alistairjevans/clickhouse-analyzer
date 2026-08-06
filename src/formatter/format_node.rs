@@ -160,6 +160,7 @@ pub fn format_node(tree: &SyntaxTree, ctx: &mut FormatterContext) {
         SyntaxKind::InExpression => format_inline(tree, ctx),
         SyntaxKind::IsNullExpression => format_inline(tree, ctx),
         SyntaxKind::LikeExpression => format_inline(tree, ctx),
+        SyntaxKind::MatchExpression => format_inline(tree, ctx),
         SyntaxKind::IntervalExpression => format_inline(tree, ctx),
         SyntaxKind::LambdaExpression => format_inline(tree, ctx),
         SyntaxKind::TupleExpression => format_paren_list(tree, ctx),

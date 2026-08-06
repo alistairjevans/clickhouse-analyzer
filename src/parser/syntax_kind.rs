@@ -205,6 +205,7 @@ pub enum SyntaxKind {
     IsNullExpression,
     IsDistinctFromExpression,
     LikeExpression,
+    MatchExpression,
     TupleExpression,
     ArrayExpression,
     ArrayAccessExpression,
