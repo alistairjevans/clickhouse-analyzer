@@ -165,7 +165,10 @@ fn parse_expression_rec_inner(p: &mut Parser, min_bp: u8) {
                 if p.nth_keyword(1, Keyword::Nulls) {
                     let m = p.precede(lhs);
                     p.advance(); // consume IGNORE or RESPECT
-                    p.advance(); // consume NULLS
+                    // `advance` steps over one raw token, whitespace included,
+                    // so NULLS has to be consumed through a trivia-skipping
+                    // helper rather than a second bare advance.
+                    p.expect_keyword(Keyword::Nulls);
                     lhs = p.complete(m, SyntaxKind::NullsModifier);
                 }
             }
@@ -2143,13 +2146,29 @@ mod tests {
                               'x'
                           ')'
                       'IGNORE'
-                    ColumnAlias
                       'NULLS'
                 FromClause
                   'FROM'
                   TableIdentifier
                     't'
         "#]]);
+    }
+
+    #[test]
+    fn ignore_nulls_before_over() {
+        // The modifier sits between the call and OVER; leaving NULLS unconsumed
+        // used to strand the whole window specification.
+        check_no_errors(
+            "SELECT last_value(x) IGNORE NULLS OVER (PARTITION BY a ORDER BY b) FROM t",
+        );
+        check_no_errors("SELECT first_value(x) RESPECT NULLS OVER w FROM t WINDOW w AS ()");
+    }
+
+    #[test]
+    fn ignore_without_nulls_is_an_alias() {
+        // `IGNORE` alone is not a modifier — it is an ordinary alias, and the
+        // lookahead must not claim it.
+        check_no_errors("SELECT count(x) ignore FROM t");
     }
 
     #[test]
@@ -2171,7 +2190,6 @@ mod tests {
                               'x'
                           ')'
                       'RESPECT'
-                    ColumnAlias
                       'NULLS'
                 FromClause
                   'FROM'
