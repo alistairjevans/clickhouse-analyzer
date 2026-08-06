@@ -382,8 +382,41 @@ fn parse_select_clause(p: &mut Parser) {
         }
     }
 
+    // TOP n [WITH TIES] / TOP (n) [WITH TIES] — ClickHouse's alternative
+    // spelling of LIMIT, written before the column list.
+    //
+    // The number is required to read TOP as the keyword. ClickHouse commits on
+    // the word alone (`SELECT top FROM t` is a syntax error there), but the
+    // lookahead costs nothing and keeps a column named `top` parsing as one —
+    // in a query the server rejects either way.
+    if p.at_keyword(Keyword::Top)
+        && (p.nth(1) == SyntaxKind::Number || p.nth(1) == SyntaxKind::OpeningRoundBracket)
+    {
+        parse_top_clause(p);
+    }
+
     parse_column_list(p);
     p.complete(m, SyntaxKind::SelectClause);
+}
+
+/// Parses: TOP n [WITH TIES] | TOP (n) [WITH TIES]
+fn parse_top_clause(p: &mut Parser) {
+    let m = p.start();
+    p.expect_keyword(Keyword::Top);
+
+    if p.eat(SyntaxKind::OpeningRoundBracket) {
+        p.expect(SyntaxKind::Number);
+        p.expect(SyntaxKind::ClosingRoundBracket);
+    } else {
+        p.expect(SyntaxKind::Number);
+    }
+
+    if p.at_keyword(Keyword::With) && p.nth_keyword(1, Keyword::Ties) {
+        p.eat_keyword(Keyword::With);
+        p.eat_keyword(Keyword::Ties);
+    }
+
+    p.complete(m, SyntaxKind::TopClause);
 }
 
 /// Parses a comma-separated list of expressions with optional aliases.
@@ -2596,6 +2629,35 @@ mod tests {
                         'z'
                       ')'
         "#]]);
+    }
+
+    #[test]
+    fn select_top() {
+        check("SELECT TOP 1 x FROM t", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  TopClause
+                    'TOP'
+                    '1'
+                  ColumnList
+                    ColumnReference
+                      'x'
+                FromClause
+                  'FROM'
+                  TableIdentifier
+                    't'
+        "#]]);
+    }
+
+    #[test]
+    fn select_top_variants() {
+        check_no_errors("SELECT TOP (5) x FROM t");
+        check_no_errors("SELECT TOP 1 WITH TIES x FROM t ORDER BY x");
+        check_no_errors("SELECT DISTINCT TOP 1 x FROM t");
+        // Without a count, TOP is read as an ordinary column reference.
+        check_no_errors("SELECT top FROM t");
     }
 
     #[test]

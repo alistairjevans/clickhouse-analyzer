@@ -307,6 +307,7 @@ pub enum Keyword {
 
     // LIMIT modifiers
     Ties,
+    Top,
 
     // QUALIFY clause
     Qualify,
@@ -562,6 +563,7 @@ impl Keyword {
             Keyword::Sets => "SETS",
             Keyword::Id => "ID",
             Keyword::Ties => "TIES",
+            Keyword::Top => "TOP",
             Keyword::Qualify => "QUALIFY",
             Keyword::Filter => "FILTER",
             Keyword::Syntax => "SYNTAX",

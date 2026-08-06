@@ -120,6 +120,7 @@ pub fn format_node(tree: &SyntaxTree, ctx: &mut FormatterContext) {
         SyntaxKind::HavingClause => format_simple_clause(tree, ctx),
         SyntaxKind::GroupByClause => format_group_by_clause(tree, ctx),
         SyntaxKind::OrderByClause => format_order_by_clause(tree, ctx),
+        SyntaxKind::TopClause => format_simple_clause(tree, ctx),
         SyntaxKind::LimitClause => format_simple_clause(tree, ctx),
         SyntaxKind::LimitByClause => format_limit_by_clause(tree, ctx),
         SyntaxKind::SettingsClause => format_settings_clause(tree, ctx),

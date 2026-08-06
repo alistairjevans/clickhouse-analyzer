@@ -60,6 +60,7 @@ pub enum SyntaxKind {
     HavingClause,
     OrderByClause,
     LimitByClause,
+    TopClause,
     LimitClause,
     SettingsClause,
     FormatClause,
