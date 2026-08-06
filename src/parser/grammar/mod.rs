@@ -14,7 +14,9 @@ use crate::parser::grammar::alter::{at_alter_statement, parse_alter_statement};
 use crate::parser::grammar::create_table::{at_create_statement, parse_create_statement};
 use crate::parser::grammar::delete::{at_delete_statement, parse_delete_statement};
 use crate::parser::grammar::insert::{at_insert_statement, parse_insert_statement};
-use crate::parser::grammar::select::{at_select_statement, parse_select_statement};
+use crate::parser::grammar::select::{
+    at_parenthesized_query, at_select_statement, parse_query_expression, parse_select_statement,
+};
 use crate::parser::grammar::show::{
     at_describe_statement, at_explain_statement, at_show_statement, parse_describe_statement,
     parse_explain_statement, parse_show_statement,
@@ -86,6 +88,10 @@ pub fn parse_source(p: &mut Parser) {
             parse_rollback_statement(p);
         } else if at_select_statement(p) {
             parse_select_statement(p);
+        } else if at_parenthesized_query(p) {
+            // A statement may be a parenthesized query expression:
+            // `(SELECT 1) UNION ALL (SELECT 2)`.
+            parse_query_expression(p);
         } else if p.at(SyntaxKind::Semicolon) {
             p.advance();
         } else if !p.eof() {

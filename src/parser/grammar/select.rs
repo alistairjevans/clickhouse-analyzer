@@ -3,6 +3,7 @@ use crate::parser::grammar::common;
 use crate::parser::grammar::expressions::{parse_expression, parse_window_spec};
 use crate::parser::grammar::show::{at_explain_statement, parse_explain_statement};
 use crate::parser::keyword::Keyword;
+use crate::parser::marker::CompletedMarker;
 use crate::parser::parser::Parser;
 
 /// Parses a full SELECT statement:
@@ -160,21 +161,109 @@ pub fn parse_select_statement(p: &mut Parser) {
 
     let completed = p.complete(m, SyntaxKind::SelectStatement);
 
-    // Set operations: UNION [ALL|DISTINCT], EXCEPT, INTERSECT
-    if p.at_keyword(Keyword::Union)
-        || p.at_keyword(Keyword::Except)
-        || p.at_keyword(Keyword::Intersect)
-    {
-        let m = p.precede(completed);
-        // Consume the set operation keyword
-        p.advance();
-        // Optional ALL or DISTINCT after UNION
-        p.eat_keyword(Keyword::All);
-        p.eat_keyword(Keyword::Distinct);
-        // Parse the right-hand SELECT
+    parse_set_operation_tail(p, completed);
+}
+
+/// Parses a query expression: a SELECT statement, or a parenthesized query
+/// expression, either of which may be one side of a set operation.
+///
+/// ClickHouse's `ParserUnionQueryElement` accepts a subquery wherever it
+/// accepts a SELECT, which is what makes all of these legal:
+///
+///   FROM ((SELECT 1) UNION ALL (SELECT 2))
+///   FROM ((SELECT 1))
+///   (SELECT 1) UNION ALL (SELECT 2)
+pub fn parse_query_expression(p: &mut Parser) {
+    if !p.at(SyntaxKind::OpeningRoundBracket) {
         parse_select_statement(p);
-        p.complete(m, SyntaxKind::UnionClause);
+        return;
     }
+
+    // Nesting is bounded here as it is in the expression parser: a run of
+    // opening parens must not be able to recurse the stack away, which on WASM
+    // would poison the whole module instance rather than just this parse.
+    if p.enter_depth() {
+        p.advance_with_error("Maximum expression nesting depth exceeded");
+        p.leave_depth();
+        return;
+    }
+
+    let m = p.start();
+    p.expect(SyntaxKind::OpeningRoundBracket);
+    if at_select_statement(p) || p.at(SyntaxKind::OpeningRoundBracket) {
+        parse_query_expression(p);
+    } else if at_explain_statement(p) {
+        parse_explain_statement(p);
+    } else {
+        p.recover_with_error("Expected subquery");
+    }
+    p.expect(SyntaxKind::ClosingRoundBracket);
+    let completed = p.complete(m, SyntaxKind::SubqueryExpression);
+    p.leave_depth();
+
+    parse_set_operation_tail(p, completed);
+
+    // A parenthesized query expression carries its own output clauses:
+    // `(SELECT 1) UNION ALL (SELECT 2) SETTINGS max_threads = 1`.
+    if p.at_keyword(Keyword::Format) {
+        let fm = p.start();
+        p.expect_keyword(Keyword::Format);
+        if p.at_identifier() {
+            p.advance();
+        } else {
+            p.recover_with_error("Expected format name after FORMAT");
+        }
+        p.complete(fm, SyntaxKind::FormatClause);
+    }
+    if p.at_keyword(Keyword::Settings) {
+        parse_settings_clause(p);
+    }
+}
+
+/// True when a `(` starts a parenthesized query expression rather than a
+/// parenthesized expression — i.e. some run of opening parens is followed by
+/// the start of a SELECT.
+pub fn at_parenthesized_query(p: &mut Parser) -> bool {
+    if !p.at(SyntaxKind::OpeningRoundBracket) {
+        return false;
+    }
+    // Bounded: past a handful of levels this is malformed input either way,
+    // and each lookahead step is a scan over the token stream.
+    for depth in 1..=MAX_QUERY_PAREN_LOOKAHEAD {
+        match p.nth(depth) {
+            SyntaxKind::OpeningRoundBracket => continue,
+            SyntaxKind::BareWord => {
+                return p.nth_keyword(depth, Keyword::Select)
+                    || p.nth_keyword(depth, Keyword::With)
+                    || p.nth_keyword(depth, Keyword::From)
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+const MAX_QUERY_PAREN_LOOKAHEAD: usize = 8;
+
+/// Parses the tail of a set operation — UNION [ALL|DISTINCT] / EXCEPT /
+/// INTERSECT and its right-hand query expression — wrapping `lhs` when present.
+fn parse_set_operation_tail(p: &mut Parser, lhs: CompletedMarker) {
+    if !(p.at_keyword(Keyword::Union)
+        || p.at_keyword(Keyword::Except)
+        || p.at_keyword(Keyword::Intersect))
+    {
+        return;
+    }
+
+    let m = p.precede(lhs);
+    // Consume the set operation keyword
+    p.advance();
+    // Optional ALL or DISTINCT after UNION
+    p.eat_keyword(Keyword::All);
+    p.eat_keyword(Keyword::Distinct);
+    // Parse the right-hand side, which may itself be parenthesized
+    parse_query_expression(p);
+    p.complete(m, SyntaxKind::UnionClause);
 }
 
 /// True if the current position marks the end of a column list
@@ -583,8 +672,11 @@ fn parse_sample_clause(p: &mut Parser) {
 fn parse_subquery_table_ref(p: &mut Parser) {
     let m = p.start();
     p.expect(SyntaxKind::OpeningRoundBracket);
-    if at_select_statement(p) {
-        parse_select_statement(p);
+    // A table reference is already a query position, so a nested `(` here can
+    // only open another query expression — no lookahead needed to tell it from
+    // a parenthesized value expression.
+    if at_select_statement(p) || p.at(SyntaxKind::OpeningRoundBracket) {
+        parse_query_expression(p);
     } else if at_explain_statement(p) {
         parse_explain_statement(p);
     } else {
@@ -1215,6 +1307,70 @@ mod tests {
             result.errors.is_empty(),
             "Expected no errors for `{input}`, got: {:?}",
             result.errors,
+        );
+    }
+
+    #[test]
+    fn parenthesized_union_in_from() {
+        check("SELECT * FROM ((SELECT 1) UNION ALL (SELECT 2))", expect![[r#"
+            File
+              SelectStatement
+                SelectClause
+                  'SELECT'
+                  ColumnList
+                    Asterisk
+                      '*'
+                FromClause
+                  'FROM'
+                  SubqueryExpression
+                    '('
+                    UnionClause
+                      SubqueryExpression
+                        '('
+                        SelectStatement
+                          SelectClause
+                            'SELECT'
+                            ColumnList
+                              NumberLiteral
+                                '1'
+                        ')'
+                      'UNION'
+                      'ALL'
+                      SubqueryExpression
+                        '('
+                        SelectStatement
+                          SelectClause
+                            'SELECT'
+                            ColumnList
+                              NumberLiteral
+                                '2'
+                        ')'
+                    ')'
+        "#]]);
+    }
+
+    #[test]
+    fn parenthesized_query_expressions() {
+        check_no_errors("SELECT * FROM ((SELECT 1))");
+        check_no_errors("SELECT * FROM ((SELECT 1) UNION ALL (SELECT 2)) AS u");
+        check_no_errors("(SELECT 1) UNION ALL (SELECT 2)");
+        check_no_errors("(SELECT 1) UNION ALL (SELECT 2) SETTINGS max_threads = 1");
+        check_no_errors("(SELECT 1) UNION ALL (SELECT 2) FORMAT JSONEachRow");
+        check_no_errors("SELECT * FROM (((SELECT 1)))");
+        // Parenthesized value expressions are untouched.
+        check_no_errors("SELECT (1 + 2) AS x FROM t WHERE y IN (SELECT 1)");
+    }
+
+    #[test]
+    fn parenthesized_query_nesting_is_bounded() {
+        // A run of opening parens must not recurse the stack away: on WASM a
+        // stack overflow poisons the module instance, not just this parse.
+        let deep = format!("SELECT * FROM {}SELECT 1{}", "(".repeat(5000), ")".repeat(5000));
+        let result = parse(&deep);
+        assert!(
+            result.errors.iter().any(|e| e.message.contains("nesting depth")),
+            "expected a nesting-depth error, got {} errors",
+            result.errors.len(),
         );
     }
 
