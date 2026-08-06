@@ -122,6 +122,12 @@ impl<'a> Tokenizer<'a> {
             return self.read_multi_line_comment();
         }
 
+        // C-style single-line comment, which ClickHouse's lexer accepts
+        // alongside `--` and `/* */`.
+        if c == '/' && self.match_char('/') {
+            return self.read_single_line_comment();
+        }
+
         // Handle various token types
         match c {
             // Numbers
@@ -822,6 +828,20 @@ mod tests {
         // `#` not followed by a space or `!` is not a comment.
         let sql = "SELECT 1 #hello";
         let tokens = tokenize_with_whitespace(sql);
+        assert!(!tokens.iter().any(|t| t.kind == SyntaxKind::Comment));
+    }
+
+    #[test]
+    fn test_double_slash_line_comment() {
+        let sql = "SELECT x IN (\n  '1.2.3.4', // Manila\n  '5.6.7.8'\n)";
+        let tokens = tokenize_with_whitespace(sql);
+        let comment = tokens.iter().find(|t| t.kind == SyntaxKind::Comment).unwrap();
+        assert_eq!(comment.text(sql), "// Manila");
+
+        // A single slash is still division.
+        let sql = "SELECT a / b";
+        let tokens = tokenize(sql);
+        assert!(tokens.iter().any(|t| t.kind == SyntaxKind::Slash));
         assert!(!tokens.iter().any(|t| t.kind == SyntaxKind::Comment));
     }
 
