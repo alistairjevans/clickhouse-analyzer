@@ -554,6 +554,18 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
                 parse_trim_args(p);
                 p.complete(m, SyntaxKind::FunctionCall)
             }
+            // SUBSTRING(str FROM start [FOR length]) — the SQL-standard
+            // spelling, which ClickHouse accepts alongside the plain
+            // substring(str, start, length) and even lets the two mix
+            // (`substring(s, 2 FOR 3)`).
+            else if p.at_keyword(Keyword::Substring) && p.nth(1) == SyntaxKind::OpeningRoundBracket {
+                let m = p.start();
+                let name = p.start();
+                p.advance(); // consume SUBSTRING
+                p.complete(name, SyntaxKind::Identifier);
+                parse_substring_args(p);
+                p.complete(m, SyntaxKind::FunctionCall)
+            }
             // INTERVAL expression
             else if p.at_keyword(Keyword::Interval) {
                 let m = p.start();
@@ -856,6 +868,34 @@ fn parse_trim_args(p: &mut Parser) {
         arg(p);
     } else if p.eat_keyword(Keyword::From) {
         arg(p);
+    }
+
+    p.expect(SyntaxKind::ClosingRoundBracket);
+    p.complete(m, SyntaxKind::ExpressionList);
+}
+
+/// Parses the argument list of SUBSTRING:
+///   substring(str, start[, length])
+///   substring(str FROM start [FOR length])
+///
+/// ClickHouse's SubstringLayer treats FROM and `,` as interchangeable first
+/// separators, and FOR and `,` as interchangeable second ones, so the mixed
+/// `substring(s, 2 FOR 3)` is valid there too. FOR without a preceding
+/// separator is not — the length is the third argument, never the second.
+fn parse_substring_args(p: &mut Parser) {
+    let m = p.start();
+    p.expect(SyntaxKind::OpeningRoundBracket);
+
+    if !p.at(SyntaxKind::ClosingRoundBracket) && !p.eof() && !p.end_of_statement() {
+        arg(p);
+
+        if p.eat_keyword(Keyword::From) || p.eat(SyntaxKind::Comma) {
+            arg(p);
+
+            if p.eat_keyword(Keyword::For) || p.eat(SyntaxKind::Comma) {
+                arg(p);
+            }
+        }
     }
 
     p.expect(SyntaxKind::ClosingRoundBracket);
@@ -1742,6 +1782,20 @@ mod tests {
                             '' - ''
                         ')'
         "#]]);
+    }
+
+    #[test]
+    fn substring_from_for() {
+        check_no_errors("SELECT substring(s FROM 2) FROM t");
+        check_no_errors("SELECT substring(s FROM 2 FOR 3) FROM t");
+        check_no_errors("SELECT SUBSTRING(s FROM 2 FOR 3) FROM t");
+        // The comma form, and ClickHouse's mixed spelling.
+        check_no_errors("SELECT substring(s, 2, 3) FROM t");
+        check_no_errors("SELECT substring(s, 2 FOR 3) FROM t");
+        // Real query shape: expressions on both sides of the separators.
+        check_no_errors(
+            "SELECT substring(label('m') FROM POSITION('request_id=' IN label('m')) + 12 FOR 36) FROM t",
+        );
     }
 
     fn check_has_errors(input: &str) {
