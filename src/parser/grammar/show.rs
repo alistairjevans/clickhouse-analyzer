@@ -220,14 +220,12 @@ pub fn parse_show_statement(p: &mut Parser) {
         parse_show_privileges(p);
     } else if p.at_keyword(Keyword::Engines) {
         parse_show_engines(p);
-    } else if p.at_keyword(Keyword::Settings) {
+    } else if p.at_keyword(Keyword::Settings) && !p.nth_text(1).eq_ignore_ascii_case("PROFILES") {
+        // SHOW SETTINGS PROFILES is a target of its own, not SHOW SETTINGS with
+        // a stray word after it.
         parse_show_settings(p);
     } else if !p.eof() && !p.end_of_statement() {
-        // Unknown SHOW target -- wrap in error and consume
-        p.advance_with_error("Unknown SHOW target");
-        while !p.eof() && !p.end_of_statement() {
-            p.advance();
-        }
+        parse_generic_show_target(p);
     } else {
         p.recover_with_error("Expected target after SHOW");
     }
@@ -363,6 +361,26 @@ fn parse_show_columns(p: &mut Parser) {
         parse_optional_limit(p);
     }
 
+    p.complete(m, SyntaxKind::ShowTarget);
+}
+
+/// Any SHOW target the parsers above do not model: the words up to the
+/// statement-level FORMAT clause or the end of the statement.
+///
+/// ClickHouse has a long tail of SHOW statements whose target is a fixed word
+/// or two and whose body is empty — ACCESS, PRIVILEGES, QUOTAS, USERS, ROLES,
+/// CURRENT ROLES, ENABLED ROLES, CLUSTERS, MERGES, FILESYSTEM CACHES, SETTINGS
+/// PROFILES, SETTING <name> — and it grows a new one most releases. Enumerating
+/// them buys nothing: none carries a table reference or an expression, so
+/// there is no structure to expose, and a target this parser has not heard of
+/// yet should not fail the statement. The rule is deliberately wider than the
+/// server's: it also accepts targets the server rejects, which for a parser
+/// whose consumers ask "is this a SHOW?" is the safer direction.
+fn parse_generic_show_target(p: &mut Parser) {
+    let m = p.start();
+    while !p.eof() && !p.end_of_statement() && !p.at_keyword(Keyword::Format) {
+        p.advance();
+    }
     p.complete(m, SyntaxKind::ShowTarget);
 }
 
@@ -1217,10 +1235,24 @@ mod tests {
     }
 
     #[test]
-    fn show_unknown_target() {
-        let result = parse("SHOW FOOBAR");
-        assert!(!result.errors.is_empty());
+    fn show_unmodelled_target() {
+        // The long tail of SHOW targets parses without the grammar listing
+        // each one; only the FORMAT clause ends the target.
+        check_no_errors("SHOW ACCESS");
+        check_no_errors("SHOW QUOTAS");
+        check_no_errors("SHOW USERS");
+        check_no_errors("SHOW ROLES");
+        check_no_errors("SHOW CURRENT ROLES");
+        check_no_errors("SHOW ENABLED ROLES");
+        check_no_errors("SHOW CLUSTERS");
+        check_no_errors("SHOW MERGES");
+        check_no_errors("SHOW FILESYSTEM CACHES");
+        check_no_errors("SHOW SETTINGS PROFILES");
+        check_no_errors("SHOW SETTING max_threads");
+        check_no_errors("SHOW NAMED COLLECTIONS FORMAT TSV");
+        check_no_errors("SHOW FOOBAR");
         check_roundtrip("SHOW FOOBAR");
+        check_roundtrip("SHOW NAMED COLLECTIONS FORMAT TSV");
     }
 
     // -----------------------------------------------------------------------
