@@ -345,8 +345,17 @@ fn parse_expression_postfix(p: &mut Parser, mut lhs: CompletedMarker, min_bp: u8
             }
         }
 
-        // [GLOBAL] [NOT] IN (...)
-        if p.at_keyword(Keyword::Global) && 4 > min_bp {
+        // GLOBAL [NOT] IN (...)
+        //
+        // GLOBAL is only an operator when IN (optionally negated) follows it:
+        // ClickHouse's operator table has exactly two GLOBAL entries, `GLOBAL IN`
+        // and `GLOBAL NOT IN`. Any other GLOBAL belongs to a following JOIN
+        // clause (`... ON a = b GLOBAL LEFT JOIN ...`), and consuming it here
+        // would fail the whole statement on the join's own keyword.
+        if p.at_keyword(Keyword::Global)
+            && (p.nth_keyword(1, Keyword::In) || p.nth_keyword(1, Keyword::Not))
+            && 4 > min_bp
+        {
             let m = p.precede(lhs);
             p.advance(); // consume GLOBAL
             p.eat_keyword(Keyword::Not); // optional NOT

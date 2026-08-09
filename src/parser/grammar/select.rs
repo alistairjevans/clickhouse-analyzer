@@ -2185,6 +2185,33 @@ mod tests {
     }
 
     #[test]
+    fn global_join_in_any_chain_position() {
+        // GLOBAL after a join constraint starts the next join, it does not open a
+        // GLOBAL IN. Every strictness/type combination has to reach the loop.
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL LEFT JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 GLOBAL INNER JOIN t2 ON t1.id = t2.id GLOBAL LEFT JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL ANY LEFT JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL ALL INNER JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL FULL OUTER JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL RIGHT JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL CROSS JOIN t3");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id = t2.id GLOBAL LEFT SEMI JOIN t3 ON t2.id = t3.id");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 USING (id) GLOBAL LEFT JOIN t3 ON t2.id = t3.id");
+        check_no_errors(
+            "SELECT a FROM t1 GLOBAL LEFT JOIN t2 ON t1.id = t2.id \
+             GLOBAL LEFT JOIN t3 ON t2.id = t3.id GLOBAL INNER JOIN t4 ON t3.id = t4.id",
+        );
+    }
+
+    #[test]
+    fn global_in_still_parses_inside_a_join_constraint() {
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id GLOBAL IN (SELECT id FROM t3)");
+        check_no_errors("SELECT a FROM t1 LEFT JOIN t2 ON t1.id GLOBAL NOT IN (SELECT id FROM t3)");
+        check_no_errors("SELECT a FROM t WHERE x GLOBAL IN (SELECT y FROM u)");
+    }
+
+    #[test]
     fn any_left_join_using() {
         check("SELECT a FROM t1 ANY LEFT JOIN t2 USING id", expect![[r#"
             File
