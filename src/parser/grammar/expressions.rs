@@ -566,6 +566,17 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
                 parse_substring_args(p);
                 p.complete(m, SyntaxKind::FunctionCall)
             }
+            // EXTRACT(unit FROM date) — the SQL-standard spelling, which
+            // ClickHouse accepts alongside the two-argument extract(haystack,
+            // pattern) regexp function.
+            else if p.at_keyword(Keyword::Extract) && p.nth(1) == SyntaxKind::OpeningRoundBracket {
+                let m = p.start();
+                let name = p.start();
+                p.advance(); // consume EXTRACT
+                p.complete(name, SyntaxKind::Identifier);
+                parse_extract_args(p);
+                p.complete(m, SyntaxKind::FunctionCall)
+            }
             // INTERVAL expression
             else if p.at_keyword(Keyword::Interval) {
                 let m = p.start();
@@ -900,6 +911,48 @@ fn parse_substring_args(p: &mut Parser) {
 
     p.expect(SyntaxKind::ClosingRoundBracket);
     p.complete(m, SyntaxKind::ExpressionList);
+}
+
+/// Parses the argument list of EXTRACT:
+///   extract(haystack, pattern)   — the regexp function
+///   EXTRACT(unit FROM date)      — the SQL-standard date part
+///
+/// ClickHouse's ExtractLayer commits to the standard form only when a unit
+/// keyword is immediately followed by FROM, and falls back to the ordinary
+/// argument list otherwise, so `extract(minute, x)` keeps its regexp meaning.
+fn parse_extract_args(p: &mut Parser) {
+    let m = p.start();
+    p.expect(SyntaxKind::OpeningRoundBracket);
+
+    if at_extract_unit(p) && p.nth_keyword(1, Keyword::From) {
+        let um = p.start();
+        p.advance(); // the unit
+        p.complete(um, SyntaxKind::Identifier);
+        p.expect_keyword(Keyword::From);
+        arg(p);
+    } else if !p.at(SyntaxKind::ClosingRoundBracket) && !p.eof() && !p.end_of_statement() {
+        arg(p);
+        while p.eat(SyntaxKind::Comma) && !p.eof() && !p.end_of_statement() {
+            arg(p);
+        }
+    }
+
+    p.expect(SyntaxKind::ClosingRoundBracket);
+    p.complete(m, SyntaxKind::ExpressionList);
+}
+
+/// True if the cursor is on a date part EXTRACT understands: an interval unit,
+/// or one of the PostgreSQL-compatible units ClickHouse allows only here.
+fn at_extract_unit(p: &mut Parser) -> bool {
+    if at_interval_unit(p) {
+        return true;
+    }
+
+    p.nth(0) == SyntaxKind::BareWord
+        && matches!(
+            p.nth_text(0).to_ascii_uppercase().as_str(),
+            "EPOCH" | "DOW" | "DOY" | "ISODOW" | "ISOYEAR" | "CENTURY" | "DECADE" | "MILLENNIUM"
+        )
 }
 
 /// Parses a parenthesized argument list for column transformers (APPLY, EXCEPT, REPLACE).
@@ -1795,6 +1848,22 @@ mod tests {
         // Real query shape: expressions on both sides of the separators.
         check_no_errors(
             "SELECT substring(label('m') FROM POSITION('request_id=' IN label('m')) + 12 FOR 36) FROM t",
+        );
+    }
+
+    #[test]
+    fn extract_unit_from_date() {
+        check_no_errors("SELECT EXTRACT(minute FROM dt) FROM t");
+        check_no_errors("SELECT extract(minute from dt) FROM t");
+        check_no_errors("SELECT EXTRACT(YEAR FROM dt) FROM t");
+        check_no_errors("SELECT EXTRACT(EPOCH FROM dt) FROM t");
+        // The two-argument regexp function keeps working, including when its
+        // first argument happens to be named like a unit.
+        check_no_errors("SELECT extract(s, '\\\\d+') FROM t");
+        check_no_errors("SELECT extract(minute, '\\\\d+') FROM t");
+        // Real query shape: the unit form inside an INTERVAL operand.
+        check_no_errors(
+            "SELECT date_trunc('hour', dt) + interval (extract(minute from dt) / 20)::int * 20 minute FROM t",
         );
     }
 

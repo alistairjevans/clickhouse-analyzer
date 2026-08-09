@@ -296,6 +296,7 @@ pub enum Keyword {
     // TRIM(BOTH|LEADING|TRAILING ... FROM ...)
     Trim,
     Substring,
+    Extract,
     Both,
     Leading,
     Trailing,
@@ -558,6 +559,7 @@ impl Keyword {
             Keyword::Skip => "SKIP",
             Keyword::Trim => "TRIM",
             Keyword::Substring => "SUBSTRING",
+            Keyword::Extract => "EXTRACT",
             Keyword::Both => "BOTH",
             Keyword::Leading => "LEADING",
             Keyword::Trailing => "TRAILING",
