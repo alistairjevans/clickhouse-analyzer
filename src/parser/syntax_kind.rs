@@ -137,6 +137,7 @@ pub enum SyntaxKind {
     CreateSettingsProfileStatement,
     AlterUserStatement,
     DropAccessEntityStatement,
+    SetRoleStatement,
 
     // =======================================================================
     // Table components

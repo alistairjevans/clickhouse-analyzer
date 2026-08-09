@@ -229,7 +229,8 @@ pub fn format_node(tree: &SyntaxTree, ctx: &mut FormatterContext) {
         | SyntaxKind::CreateRowPolicyStatement
         | SyntaxKind::CreateSettingsProfileStatement
         | SyntaxKind::AlterUserStatement
-        | SyntaxKind::DropAccessEntityStatement => format_inline(tree, ctx),
+        | SyntaxKind::DropAccessEntityStatement
+        | SyntaxKind::SetRoleStatement => format_inline(tree, ctx),
 
         // ALTER
         SyntaxKind::AlterStatement => format_alter_statement(tree, ctx),

@@ -129,6 +129,7 @@ pub enum Keyword {
 
     // Literals
     Null,
+    None,
     True,
     False,
 
@@ -433,6 +434,7 @@ impl Keyword {
             Keyword::Format => "FORMAT",
             Keyword::Sample => "SAMPLE",
             Keyword::Null => "NULL",
+            Keyword::None => "NONE",
             Keyword::True => "TRUE",
             Keyword::False => "FALSE",
             Keyword::Interval => "INTERVAL",

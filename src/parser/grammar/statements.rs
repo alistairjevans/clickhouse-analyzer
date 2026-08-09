@@ -49,6 +49,15 @@ pub fn parse_set_statement(p: &mut Parser) {
     let m = p.start();
     p.expect_keyword(Keyword::Set);
 
+    // SET ROLE / SET DEFAULT ROLE take a role set, not `name = value`.
+    if p.at_keyword(Keyword::Role)
+        || (p.at_keyword(Keyword::Default) && p.nth_keyword(1, Keyword::Role))
+    {
+        parse_set_role_body(p);
+        p.complete(m, SyntaxKind::SetStatement);
+        return;
+    }
+
     let mut first = true;
     while !p.end_of_statement() {
         if !first {
@@ -60,6 +69,70 @@ pub fn parse_set_statement(p: &mut Parser) {
     }
 
     p.complete(m, SyntaxKind::SetStatement);
+}
+
+/// Parses the body of:
+///   SET ROLE {DEFAULT | NONE | ALL [EXCEPT role, ...] | role [, role ...]}
+///   SET DEFAULT ROLE {NONE | ALL [EXCEPT role, ...] | role [, ...]} TO user [, ...]
+///
+/// Mirrors ClickHouse's ParserSetRoleQuery: SET ROLE DEFAULT takes nothing
+/// further, the other kinds take a role set, and SET DEFAULT ROLE additionally
+/// requires TO followed by a user set.
+fn parse_set_role_body(p: &mut Parser) {
+    let m = p.start();
+
+    let set_default_role = p.at_keyword(Keyword::Default);
+    if set_default_role {
+        p.advance(); // DEFAULT
+    }
+    p.expect_keyword(Keyword::Role);
+
+    // SET ROLE DEFAULT — no role set follows.
+    if !set_default_role && p.eat_keyword(Keyword::Default) {
+        p.complete(m, SyntaxKind::SetRoleStatement);
+        return;
+    }
+
+    parse_role_or_user_set(p);
+
+    if set_default_role {
+        p.expect_keyword(Keyword::To);
+        parse_role_or_user_set(p);
+    }
+
+    p.complete(m, SyntaxKind::SetRoleStatement);
+}
+
+/// NONE | ALL [EXCEPT name, ...] | name [, name ...]
+fn parse_role_or_user_set(p: &mut Parser) {
+    if p.eat_keyword(Keyword::None) {
+        return;
+    }
+
+    if p.eat_keyword(Keyword::All) {
+        if !p.eat_keyword(Keyword::Except) {
+            return;
+        }
+    }
+
+    parse_name_list(p);
+}
+
+/// A comma-separated list of identifiers (role or user names).
+fn parse_name_list(p: &mut Parser) {
+    loop {
+        if p.at_identifier() || p.at(SyntaxKind::StringToken) {
+            p.advance();
+        } else {
+            p.recover_with_error("Expected a name");
+            return;
+        }
+
+        if !p.at(SyntaxKind::Comma) {
+            return;
+        }
+        p.advance(); // comma
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -978,6 +1051,41 @@ mod tests {
         let mut buf = String::new();
         result.tree.print(&mut buf, 0, &result.source);
         expected_tree.assert_eq(&buf);
+    }
+
+    fn check_no_errors(input: &str) {
+        let result = parse(input);
+        assert!(
+            result.errors.is_empty(),
+            "Expected no errors for `{input}`, got: {:?}",
+            result.errors,
+        );
+    }
+
+    #[test]
+    fn test_set_role() {
+        check(
+            "SET ROLE NONE",
+            expect![[r#"
+                File
+                  SetStatement
+                    'SET'
+                    SetRoleStatement
+                      'ROLE'
+                      'NONE'
+            "#]],
+        );
+        check_no_errors("SET ROLE DEFAULT");
+        check_no_errors("SET ROLE r1");
+        check_no_errors("SET ROLE r1, r2");
+        check_no_errors("SET ROLE ALL");
+        check_no_errors("SET ROLE ALL EXCEPT r1, r2");
+        check_no_errors("SET DEFAULT ROLE r1 TO u1");
+        check_no_errors("SET DEFAULT ROLE NONE TO u1, u2");
+        check_no_errors("SET DEFAULT ROLE ALL EXCEPT r1 TO u1");
+        // Plain settings are unaffected.
+        check_no_errors("SET max_threads = 4");
+        check_no_errors("SET max_threads = 4, max_memory_usage = 100");
     }
 
     #[test]
