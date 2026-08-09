@@ -462,6 +462,12 @@ fn parse_in_rhs(p: &mut Parser) {
                 parse_expression(p);
                 while p.at(SyntaxKind::Comma) && !p.eof() {
                     p.advance();
+                    // Trailing comma before `)` — the IN right-hand side is a
+                    // parenthesized expression list, so it takes one just like a
+                    // tuple literal does.
+                    if p.at(SyntaxKind::ClosingRoundBracket) {
+                        break;
+                    }
                     parse_expression(p);
                 }
             }
@@ -602,6 +608,7 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
             let m = p.start();
             p.expect(SyntaxKind::OpeningRoundBracket);
             let mut count = 0;
+            let mut trailing_comma = false;
             if !p.at(SyntaxKind::ClosingRoundBracket) {
                 parse_expression(p);
                 // ClickHouse allows expression aliases inside parens:
@@ -610,6 +617,16 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
                 count += 1;
                 while p.at(SyntaxKind::Comma) && !p.eof() {
                     p.advance();
+                    // A comma straight before the closing bracket is a trailing
+                    // comma, which ClickHouse's RoundBracketsLayer accepts (it
+                    // merges the element only when one is pending). The list must
+                    // already be non-empty and the comma must be the last one:
+                    // `(,)` and `(1,,2)` are syntax errors there too, and remain
+                    // errors here because the loop only breaks on `)`.
+                    if p.at(SyntaxKind::ClosingRoundBracket) {
+                        trailing_comma = true;
+                        break;
+                    }
                     parse_expression(p);
                     parse_expression_alias(p);
                     count += 1;
@@ -617,7 +634,9 @@ fn expr_delimited(p: &mut Parser) -> Option<CompletedMarker> {
             }
 
             p.expect(SyntaxKind::ClosingRoundBracket);
-            if count > 1 {
+            // The comma is what makes parentheses a tuple, so `(x,)` is a
+            // one-element tuple, not a parenthesized `x`.
+            if count > 1 || trailing_comma {
                 p.complete(m, SyntaxKind::TupleExpression)
             } else {
                 p.complete(m, SyntaxKind::Expression)
@@ -1723,6 +1742,42 @@ mod tests {
                             '' - ''
                         ')'
         "#]]);
+    }
+
+    fn check_has_errors(input: &str) {
+        let result = parse(input);
+        assert!(
+            !result.errors.is_empty(),
+            "Expected an error for `{input}`",
+        );
+    }
+
+    #[test]
+    fn trailing_comma_in_parenthesized_list() {
+        // Verified against ClickHouse 25.12.3.21: a parenthesized expression
+        // list takes one trailing comma, wherever it appears.
+        check_no_errors("SELECT ('a', 'b', )");
+        check_no_errors("SELECT ('a', )");
+        check_no_errors("SELECT ('a', ('b', 'c', ), )");
+        check_no_errors("SELECT * FROM t WHERE x IN ('a', 'b', )");
+        check_no_errors("SELECT * FROM t WHERE (a, b) IN ((1, 2), (3, 4), )");
+        check_no_errors("SELECT countMergeIf(c, label('e') IN ('a', 'b', )) FROM t");
+        check_no_errors("SELECT a FROM t GROUP BY a HAVING a IN (1, 2, )");
+    }
+
+    #[test]
+    fn trailing_comma_stays_an_error_where_clickhouse_rejects_it() {
+        // A function argument list is a different parser on the server
+        // (FunctionLayer, not RoundBracketsLayer) and takes no trailing comma.
+        check_has_errors("SELECT concat('a', 'b', )");
+        check_has_errors("SELECT tuple('a', 'b', )");
+        check_has_errors("SELECT map('a', 1, )");
+        // Array literals likewise.
+        check_has_errors("SELECT ['a', 'b', ]");
+        // One comma, and only after an element.
+        check_has_errors("SELECT (, )");
+        check_has_errors("SELECT (1, , 2)");
+        check_has_errors("SELECT * FROM t WHERE x IN (1, 2, , )");
     }
 
     #[test]
