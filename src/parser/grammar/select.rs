@@ -516,6 +516,10 @@ pub fn parse_column_list(p: &mut Parser) {
     let mut first = true;
     while !at_column_list_end(p, first) && !p.end_of_statement() {
         if !first {
+            if at_select_list_trailing_comma(p) {
+                p.advance(); // consume the trailing comma
+                break;
+            }
             p.expect(SyntaxKind::Comma);
         }
         first = false;
@@ -525,6 +529,71 @@ pub fn parse_column_list(p: &mut Parser) {
     }
 
     p.complete(m, SyntaxKind::ColumnList);
+}
+
+/// True when the comma under the cursor ends the SELECT list rather than
+/// introducing another column: `SELECT a, b, FROM t` and `SELECT a, b,`.
+///
+/// ClickHouse allows this only in the SELECT clause (ParserSelectQuery passes
+/// `allow_trailing_commas`; GROUP BY, ORDER BY, LIMIT BY, WITH, the VALUES list
+/// and function arguments all reject it), and only when the comma is followed
+/// by FROM or the end of the query. It has to stay that narrow because `from`
+/// is also a legal column name: in `SELECT to, from FROM t` the first comma is
+/// a separator, not a trailing comma.
+///
+/// The server disambiguates those by what follows FROM — a comma, a second
+/// FROM, an alias, or an operator all mean `from` was a column. This parser
+/// requires the token after FROM to look like the start of a table reference,
+/// which excludes the same shapes.
+fn at_select_list_trailing_comma(p: &mut Parser) -> bool {
+    if !p.at(SyntaxKind::Comma) {
+        return false;
+    }
+
+    // `SELECT a, b,` — end of the query or of the enclosing statement.
+    if p.nth(1) == SyntaxKind::EndOfStream || p.nth(1) == SyntaxKind::Semicolon {
+        return true;
+    }
+
+    if !p.nth_keyword(1, Keyword::From) {
+        return false;
+    }
+
+    // `from` used as a column name — the token after it continues the
+    // expression list instead of naming a table.
+    if p.nth(2) == SyntaxKind::Comma
+        || p.nth_keyword(2, Keyword::From)
+        || p.nth_keyword(2, Keyword::As)
+        || at_keyword_operator(p, 2)
+    {
+        return false;
+    }
+
+    // A table reference starts with a name (possibly a table function) or an
+    // opening bracket (a subquery); anything else is an operator on `from`.
+    matches!(
+        p.nth(2),
+        SyntaxKind::BareWord
+            | SyntaxKind::QuotedIdentifier
+            | SyntaxKind::OpeningRoundBracket
+            | SyntaxKind::EndOfStream
+            | SyntaxKind::Semicolon
+    )
+}
+
+/// True if the token `n` ahead is a keyword that acts as an infix operator, so
+/// the identifier before it is an operand rather than the end of a clause.
+fn at_keyword_operator(p: &mut Parser, n: usize) -> bool {
+    p.nth_keyword(n, Keyword::In)
+        || p.nth_keyword(n, Keyword::Not)
+        || p.nth_keyword(n, Keyword::Like)
+        || p.nth_keyword(n, Keyword::Ilike)
+        || p.nth_keyword(n, Keyword::Between)
+        || p.nth_keyword(n, Keyword::And)
+        || p.nth_keyword(n, Keyword::Or)
+        || p.nth_keyword(n, Keyword::Is)
+        || p.nth_keyword(n, Keyword::Global)
+        || p.nth_keyword(n, Keyword::Regexp)
 }
 
 /// Parses an optional column alias: `AS name` or a bare `name`.
@@ -2182,6 +2251,39 @@ mod tests {
                       '.'
                       'id'
         "#]]);
+    }
+
+    #[test]
+    fn trailing_comma_in_select_list() {
+        // Verified against ClickHouse 25.12.3.21: only before FROM or the end
+        // of the query.
+        check_no_errors("SELECT a, b, FROM t");
+        check_no_errors("SELECT a, FROM t");
+        check_no_errors("SELECT a, b,");
+        check_no_errors("SELECT a, b, ;");
+        check_no_errors("SELECT *, FROM t");
+        check_no_errors("SELECT DISTINCT a, b, FROM t");
+        check_no_errors("WITH x AS (SELECT 1) SELECT a, FROM t");
+        check_no_errors("SELECT a, FROM (SELECT 1)");
+        check_no_errors("SELECT count(x), label('c'), FROM t WHERE y = 1 GROUP BY label('c')");
+    }
+
+    #[test]
+    fn trailing_comma_outside_the_select_list_stays_an_error() {
+        // The server allows a trailing comma in the SELECT clause only.
+        let cases = [
+            "SELECT a FROM t GROUP BY a, b,",
+            "SELECT a FROM t ORDER BY a, b,",
+            "SELECT a FROM t LIMIT 1 BY a, b,",
+            "WITH a AS (SELECT 1), b AS (SELECT 2), SELECT 1",
+            "SELECT a, WHERE 1",
+            "SELECT a, GROUP BY a",
+            "SELECT 1, UNION ALL SELECT 2",
+        ];
+        for input in cases {
+            let result = parse(input);
+            assert!(!result.errors.is_empty(), "Expected an error for `{input}`");
+        }
     }
 
     #[test]
